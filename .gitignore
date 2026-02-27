@@ -1,0 +1,7 @@
+*.old
+*.bak
+.directory
+.env
+.env.*
+dist/
+node_modules/
