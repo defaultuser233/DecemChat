@@ -1,0 +1,9 @@
+*.old
+*.bak
+.directory
+.env
+dist/
+node_modules/
+
+# Local Netlify folder
+.netlify
