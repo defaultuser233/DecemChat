@@ -51,9 +51,9 @@ export function useChat(model: string) {
   });
 
   const [isLoading, setIsLoading] = useState(false);
-  const [streamingContent, setStreamingContent] = useState('');
+  const [typingMessageId, setTypingMessageId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const streamingMessageIdRef = useRef<string | null>(null);
+  const typingTimerRef = useRef<number | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
 
   // 加载完成后，异步恢复图片
@@ -107,15 +107,14 @@ export function useChat(model: string) {
         await saveImage(messageId, imageUrl);
       }
 
-      // 先添加用户消息
-      setMessages((prev) => [...prev, userMessage]);
+      const nextMessages = [...messages, userMessage];
+      setMessages(nextMessages);
       setIsLoading(true);
-      setStreamingContent('');
       setError(null);
 
       // 创建AI消息的ID
       const assistantMessageId = (Date.now() + 1).toString();
-      streamingMessageIdRef.current = assistantMessageId;
+      setTypingMessageId(assistantMessageId);
 
       // 添加空的AI消息占位（内容为空时显示loading）
       setMessages((prev) => [
@@ -128,11 +127,12 @@ export function useChat(model: string) {
         },
       ]);
 
-      let accumulatedContent = '';
+      let fullResponse = '';
 
       // 根据模型上下文窗口动态调整保留的历史消息数
       const modelInfo = AVAILABLE_MODELS.find(m => m.id === model);
       const historyLimit = modelInfo?.maxHistoryMessages ?? 10;
+      const history = nextMessages.slice(-historyLimit);
 
       try {
         const history = messages.slice(-historyLimit);
@@ -142,76 +142,72 @@ export function useChat(model: string) {
           model,
           {
             onChunk: (chunk) => {
-              accumulatedContent += chunk;
-              setStreamingContent(accumulatedContent);
-              // 实时更新消息列表中的内容，避免中断后空白
-              setMessages((prev) => {
-                const lastIdx = prev.length - 1;
-                if (
-                  lastIdx >= 0 &&
-                  prev[lastIdx].id === assistantMessageId
-                ) {
-                  const updated = [...prev];
-                  updated[lastIdx] = {
-                    ...updated[lastIdx],
-                    content: accumulatedContent,
-                  };
-                  return updated;
-                }
-                return prev;
-              });
+              fullResponse += chunk;
             },
-            onComplete: (fullContent) => {
-              setMessages((prev) => {
-                const lastIdx = prev.length - 1;
-                if (
-                  lastIdx >= 0 &&
-                  prev[lastIdx].id === assistantMessageId
-                ) {
-                  const updated = [...prev];
-                  updated[lastIdx] = {
-                    ...updated[lastIdx],
-                    content: fullContent,
-                  };
-                  return updated;
-                }
-                return prev;
-              });
-              setStreamingContent('');
-              streamingMessageIdRef.current = null;
-              setIsLoading(false);
+            onComplete: (responseText) => {
+              fullResponse = responseText;
             },
             onError: (errorMsg) => {
-              // 错误时保留已累积的内容，不让消息空白
-              setMessages((prev) => {
-                const lastIdx = prev.length - 1;
-                if (
-                  lastIdx >= 0 &&
-                  prev[lastIdx].id === assistantMessageId
-                ) {
-                  const updated = [...prev];
-                  updated[lastIdx] = {
-                    ...updated[lastIdx],
-                    content:
-                      accumulatedContent ||
-                      '（狐狐的信号被森林里的风暴打断啦...）',
-                  };
-                  return updated;
-                }
-                return prev;
-              });
-              setError(errorMsg);
-              setStreamingContent('');
-              streamingMessageIdRef.current = null;
-              setIsLoading(false);
+              throw new Error(errorMsg);
             },
           }
         );
+
+        if (!fullResponse) {
+          throw new Error('服务器未返回有效内容');
+        }
+
+        const targetText = fullResponse;
+        const typingSpeed = 8; // 每个字符的打字速度，单位毫秒
+        let currentIndex = 0;
+
+        if (typingTimerRef.current) {
+          window.clearInterval(typingTimerRef.current);
+        }
+
+        setMessages((prev) => {
+          const lastIdx = prev.length - 1;
+          if (lastIdx >= 0 && prev[lastIdx].id === assistantMessageId) {
+            const updated = [...prev];
+            updated[lastIdx] = {
+              ...updated[lastIdx],
+              content: '',
+            };
+            return updated;
+          }
+          return prev;
+        });
+
+        typingTimerRef.current = window.setInterval(() => {
+          currentIndex += 1;
+          const partial = targetText.slice(0, currentIndex);
+          setMessages((prev) => {
+            const lastIdx = prev.length - 1;
+            if (lastIdx >= 0 && prev[lastIdx].id === assistantMessageId) {
+              const updated = [...prev];
+              updated[lastIdx] = {
+                ...updated[lastIdx],
+                content: partial,
+              };
+              return updated;
+            }
+            return prev;
+          });
+
+          if (currentIndex >= targetText.length) {
+            if (typingTimerRef.current) {
+              window.clearInterval(typingTimerRef.current);
+              typingTimerRef.current = null;
+            }
+            setTypingMessageId(null);
+            setIsLoading(false);
+          }
+        }, typingSpeed);
       } catch (err) {
         const errorMessage =
           err instanceof Error ? err.message : '发送消息失败';
         setError(errorMessage);
-        streamingMessageIdRef.current = null;
+        setTypingMessageId(null);
         setIsLoading(false);
         console.error('Chat error:', err);
       } finally {
@@ -230,9 +226,12 @@ export function useChat(model: string) {
         timestamp: Date.now(),
       },
     ]);
-    setStreamingContent('');
     setError(null);
-    streamingMessageIdRef.current = null;
+    setTypingMessageId(null);
+    if (typingTimerRef.current) {
+      window.clearInterval(typingTimerRef.current);
+      typingTimerRef.current = null;
+    }
     localStorage.removeItem(CHAT_STORAGE_KEY);
     clearAllImages().catch(console.error);
   }, []);
@@ -244,16 +243,15 @@ export function useChat(model: string) {
     if (!lastUserMessage) return;
 
     const lastMessage = messages[messages.length - 1];
-    if (lastMessage.role === 'assistant') {
+    if (lastMessage?.role === 'assistant') {
       setMessages((prev) => prev.slice(0, -1));
     }
 
     setIsLoading(true);
-    setStreamingContent('');
     setError(null);
 
     const assistantMessageId = Date.now().toString();
-    streamingMessageIdRef.current = assistantMessageId;
+    setTypingMessageId(assistantMessageId);
 
     setMessages((prev) => [
       ...prev,
@@ -265,7 +263,7 @@ export function useChat(model: string) {
       },
     ]);
 
-    let accumulatedContent = '';
+    let fullResponse = '';
 
     try {
       const modelInfo = AVAILABLE_MODELS.find(m => m.id === model);
@@ -277,74 +275,72 @@ export function useChat(model: string) {
         model,
         {
           onChunk: (chunk) => {
-            accumulatedContent += chunk;
-            setStreamingContent(accumulatedContent);
-            setMessages((prev) => {
-              const lastIdx = prev.length - 1;
-              if (
-                lastIdx >= 0 &&
-                prev[lastIdx].id === assistantMessageId
-              ) {
-                const updated = [...prev];
-                updated[lastIdx] = {
-                  ...updated[lastIdx],
-                  content: accumulatedContent,
-                };
-                return updated;
-              }
-              return prev;
-            });
+            fullResponse += chunk;
           },
-          onComplete: (fullContent) => {
-            setMessages((prev) => {
-              const lastIdx = prev.length - 1;
-              if (
-                lastIdx >= 0 &&
-                prev[lastIdx].id === assistantMessageId
-              ) {
-                const updated = [...prev];
-                updated[lastIdx] = {
-                  ...updated[lastIdx],
-                  content: fullContent,
-                };
-                return updated;
-              }
-              return prev;
-            });
-            setStreamingContent('');
-            streamingMessageIdRef.current = null;
-            setIsLoading(false);
+          onComplete: (responseText) => {
+            fullResponse = responseText;
           },
           onError: (errorMsg) => {
-            setMessages((prev) => {
-              const lastIdx = prev.length - 1;
-              if (
-                lastIdx >= 0 &&
-                prev[lastIdx].id === assistantMessageId
-              ) {
-                const updated = [...prev];
-                updated[lastIdx] = {
-                  ...updated[lastIdx],
-                  content:
-                    accumulatedContent ||
-                    '（狐狐的信号被森林里的风暴打断啦...）',
-                };
-                return updated;
-              }
-              return prev;
-            });
-            setError(errorMsg);
-            setStreamingContent('');
-            streamingMessageIdRef.current = null;
-            setIsLoading(false);
+            throw new Error(errorMsg);
           },
         }
       );
+
+      if (!fullResponse) {
+        throw new Error('服务器未返回有效内容');
+      }
+
+      const targetText = fullResponse;
+      const typingSpeed = 12;
+      let currentIndex = 0;
+
+      if (typingTimerRef.current) {
+        window.clearInterval(typingTimerRef.current);
+      }
+
+      setMessages((prev) => {
+        const lastIdx = prev.length - 1;
+        if (lastIdx >= 0 && prev[lastIdx].id === assistantMessageId) {
+          const updated = [...prev];
+          updated[lastIdx] = {
+            ...updated[lastIdx],
+            content: '',
+          };
+          return updated;
+        }
+        return prev;
+      });
+
+      typingTimerRef.current = window.setInterval(() => {
+        currentIndex += 1;
+        const partial = targetText.slice(0, currentIndex);
+        setMessages((prev) => {
+          const lastIdx = prev.length - 1;
+          if (lastIdx >= 0 && prev[lastIdx].id === assistantMessageId) {
+            const updated = [...prev];
+            updated[lastIdx] = {
+              ...updated[lastIdx],
+              content: partial,
+            };
+            return updated;
+          }
+          return prev;
+        });
+
+        if (currentIndex >= targetText.length) {
+          if (typingTimerRef.current) {
+            window.clearInterval(typingTimerRef.current);
+            typingTimerRef.current = null;
+          }
+          setTypingMessageId(null);
+          setIsLoading(false);
+        }
+      }, typingSpeed);
     } catch (err) {
       const errorMessage =
         err instanceof Error ? err.message : '重新生成失败';
       setError(errorMessage);
-      streamingMessageIdRef.current = null;
+      setTypingMessageId(null);
       setIsLoading(false);
     }
   }, [messages, model]);
@@ -352,8 +348,7 @@ export function useChat(model: string) {
   return {
     messages,
     isLoading,
-    streamingContent,
-    streamingMessageId: streamingMessageIdRef.current,
+    typingMessageId,
     error,
     sendMessage,
     clearMessages,

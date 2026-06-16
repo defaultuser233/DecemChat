@@ -1,141 +1,130 @@
 # 🦊 Decem Chat
 
-> 与一只住在奇幻森林里的赤狐聊天
+> 与赤狐 Decem 聊天的 AI Web 应用
 
-Decem Chat 是一个基于 React 的 AI 对话网页应用，通过与阿里云百炼平台的多款大语言模型对接，让你可以和 Decem——一只拟人化的赤狐 OC 角色——进行有趣的对话。
+# Decem 是谁？
 
-![Preview](public/images/decem.png)
+是一只狐狸
+![](https://valedecem.top/images/fox.png)
 
-## ✨ 功能特点
+Decem Chat 是一个基于 **React 19 + TypeScript + Vite** 的前端应用，使用 **Netlify Edge Function** 代理请求到 **阿里云百炼 DashScope** 的聊天接口。应用支持聊天持久化、打字机动画、图片消息、主题切换和多模型选择。
 
-- **流式对话** — AI 回复逐字显示，体验流畅自然
-- **图片发送** — 可以发送图片给支持视觉理解的模型
-- **深色/浅色模式** — 一键切换主题
-- **聊天记录持久化** — 自动保存到 localStorage，刷新不丢失
-- **自定义头像** — 上传自己的头像
-- **多模型切换** — 在多款大模型之间自由切换
-- **设置面板** — 玻璃态效果的侧边栏设置
+## ✨ 核心功能
 
-## 🤖 支持的模型
+- **AI 聊天**：与 Decem 进行自然语言对话
+- **安全代理**：前端请求 `/api/chat`，后端 Edge Function 使用服务器环境变量调用 AI API
+- **逐字打字机动效**：收到完整回复后逐字呈现
+- **图片消息**：支持向视觉模型发送图片输入
+- **主题切换**：深色 / 浅色模式
+- **聊天记录保存**：消息保存在浏览器 localStorage
+- **设置面板**：切换模型、更新头像、清空聊天记录
 
-| 模型 | 描述 | 图片 | 视频 |
-|------|------|:----:|:----:|
-| ⚡ **Qwen3.6-Flash** | 像闪电一样快的小狐狸！ | 👁️ | 🎬 |
-| 🧠 **Qwen3.6-Plus** | 更聪明的大狐狸！推理和复杂任务更强 | 👁️ | 🎬 |
-| 🏆 **Qwen3.7-Max** | 森林里的智者！综合能力最强 | — | — |
-| 🌐 **Qwen3.5-Omni-Plus** | 全能的旅行狐狸！多语言和跨领域知识都擅长 | 👁️ | 🎬 |
-| 🐳 **DeepSeek-V4-Pro** | 人坏，小鲸鱼好 | — | — |
-| 🐳 **DeepSeek-V4-Flash** | 小鲸鱼最好了 | — | — |
-| 🌕 **Kimi-K2.6** | 寻求将能源转化为智能的最优解 | 👁️ | 🎬 |
-| 🐼 **GLM-5.1** | 整理竹子的熊猫 | — | — |
+## 📦 技术栈
 
-## 🛠️ 技术栈
+- React 19 + TypeScript
+- Vite
+- Tailwind CSS
+- Netlify Edge Functions
+- 阿里云百炼 DashScope 兼容接口
+- react-markdown + rehype-highlight
+- localStorage + IndexedDB 图片存储
 
-- **前端框架**: React 19 + TypeScript
-- **构建工具**: Vite
-- **样式**: Tailwind CSS + shadcn/ui
-- **AI API**: 阿里云百炼 (DashScope) OpenAI 兼容接口
-- **流式处理**: Fetch API + ReadableStream
-- **数据持久化**: localStorage
-
-## 📁 项目结构
+## 📁 目录结构
 
 ```
+├── netlify/
+│   └── edge-functions/
+│       └── chat.ts          # Netlify Edge Function 代理 AI 请求
+├── public/                  # 静态资源
 ├── src/
-│   ├── components/         # React 组件
-│   │   ├── ChatInterface.tsx   # 主聊天界面
-│   │   ├── ChatInput.tsx       # 输入框组件
-│   │   ├── MessageBubble.tsx   # 消息气泡组件
-│   │   └── SettingsPanel.tsx   # 设置面板
-│   ├── hooks/              # 自定义 Hooks
-│   │   ├── useChat.ts          # 聊天逻辑
-│   │   └── useSettings.ts    # 设置管理
-│   ├── services/           # API 服务
-│   │   └── aiApi.ts            # 阿里云百炼 API
-│   ├── types/              # TypeScript 类型
-│   │   └── index.ts
-│   └── index.css           # 全局样式
-├── public/
-│   └── images/             # 头像图片
-├── .gitignore
-└── vite.config.ts
+│   ├── components/          # UI 组件
+│   ├── hooks/               # 自定义 Hook
+│   ├── services/            # AI 和图片服务
+│   ├── types/               # TypeScript 类型定义
+│   └── main.tsx             # 应用入口
+├── netlify.toml             # Netlify 构建和路由配置
+├── package.json
+└── tsconfig.json
 ```
 
 ## 🚀 本地开发
 
-### 1. 克隆项目
-
-```bash
-git clone https://github.com/defaultuser233/DecemChat.git
-cd DecemChat
-```
-
-### 2. 安装依赖
+### 1. 安装依赖
 
 ```bash
 pnpm install
 ```
 
-### 3. 配置 API Key
+### 2. 配置环境变量
 
-设置环境变量
-
-阿里云百炼 API Key 请在 https://bailian.console.aliyun.com/ 获取
+在项目根目录创建 `.env` 或使用 Netlify 环境变量。必须设置：
 
 ```bash
-export VITE_API_KEY=sk-XXXXXXXX
+API_KEY=sk-xxxxxxxxxxxxxxxxxxxx
 ```
 
-### 4. 准备头像图片
+> Edge Function 会读取以下环境变量之一：`API_KEY`、`DASHSCOPE_API_KEY`、`NETLIFY_API_KEY`
 
-将头像图片放到 `public/images/` 目录下：
-
-- `decem.png` — Decem 的头像
-- `default.png` — 用户的默认头像
-
-### 5. 启动开发服务器
+### 3. 启动开发服务器
 
 ```bash
 pnpm run dev
 ```
 
-### 6. 构建生产版本
+### 4. 构建生产版本
 
 ```bash
 pnpm run build
 ```
 
-### 7. 预览生产分支
+### 5. 预览生产构建
 
 ```bash
 pnpm run preview
 ```
 
-## ⚙️ 环境变量
+## 🧩 Netlify 部署说明
 
-| 变量名 | 说明 | 必填 |
-|--------|------|:----:|
-| `VITE_API_KEY` | 阿里云百炼 API Key | ✅ |
+项目使用 `netlify.toml` 配置：
 
-获取方式：登录 [阿里云百炼控制台](https://bailian.console.aliyun.com/)
+- `build.command`: `pnpm run build`
+- `publish`: `dist`
+- `edge_functions`: 将 `/api/chat` 映射到 `netlify/edge-functions/chat.ts`
 
-## 📝 提示词
+前端请求 `/api/chat`，Edge Function 负责将请求转发到 DashScope，保护 API Key 不暴露到浏览器。
 
-Decem 的角色设定和说话风格通过系统提示词（System Prompt）注入，位于 `src/services/SYSTEM_PROMPT.ts` 中。
+## 🔐 安全说明
 
-核心设定：
-- 身份：拟人化的赤狐，不是 AI 助手
-- 语气：软萌简短，爱用"嗷呜~"
-- 格式：开头带 🦊，结尾带"嗷呜~"
-- Emoji：主要使用 🦊🧣🍃❤️✨🥺
-- 心理活动：用 `()` 包含，每轮至少一处
+- **不要**将 API Key 写入前端环境变量 `VITE_...`
+- 只能在服务端环境变量中配置 `API_KEY` 或 `NETLIFY_API_KEY`
+- `.env` 文件应加入 `.gitignore`
 
-## 🔒 安全说明
+## 🛰️ AI 接口实现
 
-- API Key 保存在 `.env` 文件中
-- `.env` 已加入 `.gitignore`，**不要**提交到 Git
-- 聊天记录保存在用户浏览器本地，不会上传到服务器
+`netlify/edge-functions/chat.ts` 将收到的 POST 请求转发到：
+
+- `https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions`
+
+请求使用 `stream: false`，并返回完整结果给前端。
+
+前端接口位于 `src/services/aiApi.ts`：
+
+- 请求地址：`/api/chat`
+- 发送模型 ID 和消息历史
+- 解析返回的 `content`
+
+## 🎛️ 运行说明
+
+- 聊天消息和用户头像从浏览器本地保存
+- 支持发送图片给视觉模型
+- 回答内容在收到完整结果后呈现“打字机动画”效果
+
+## 📌 其他说明
+
+- 系统提示词位于：`src/services/SYSTEM_PROMPT.ts`
+- 聊天 UI 组件在：`src/components/ChatInterface.tsx`
+- 核心聊天逻辑在：`src/hooks/useChat.ts`
 
 ---
 
-🦊 和狐狐聊天愉快！嗷呜~
+如果你需要快速部署到 Netlify，只需确保 `API_KEY` 配置好，并把仓库推送到 Netlify 即可。

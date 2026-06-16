@@ -9,8 +9,7 @@ import { useToast } from '@/hooks/use-toast';
 interface ChatInterfaceProps {
   messages: Message[];
   isLoading: boolean;
-  streamingContent: string;
-  streamingMessageId: string | null;
+  typingMessageId: string | null;
   error: string | null;
   settings: {
     model: string;
@@ -30,8 +29,7 @@ interface ChatInterfaceProps {
 export function ChatInterface({
   messages,
   isLoading,
-  streamingContent,
-  streamingMessageId,
+  typingMessageId,
   error,
   settings,
   onSendMessage,
@@ -51,7 +49,7 @@ export function ChatInterface({
     if (messagesContainerRef.current) {
       messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight;
     }
-  }, [messages, streamingContent]);
+  }, [messages]);
 
   // Show error toast
   useEffect(() => {
@@ -142,18 +140,13 @@ export function ChatInterface({
       >
         <div className="space-y-6 max-w-3xl mx-auto">
           {messages.map((message, index) => {
-            const isStreaming = isLoading && message.id === streamingMessageId;
-            // 如果是正在流式的消息，显示流式内容
-            const displayMessage = isStreaming 
-              ? { ...message, content: streamingContent }
-              : message;
-            
+            const isTyping = isLoading && message.id === typingMessageId;
             return (
               <MessageBubble
                 key={message.id}
-                message={displayMessage}
+                message={message}
                 avatar={message.role === 'user' ? settings.userAvatar : settings.decemAvatar}
-                isStreaming={isStreaming}
+                isStreaming={isTyping}
                 onRegenerate={index === actualLastAssistantIndex ? onRegenerateResponse : undefined}
                 isLastAssistantMessage={index === actualLastAssistantIndex}
               />

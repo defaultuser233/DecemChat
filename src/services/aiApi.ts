@@ -2,8 +2,8 @@ import type { Message } from '@/types';
 import { AVAILABLE_MODELS } from '@/types';
 import { SYSTEM_PROMPT } from './SYSTEM_PROMPT';
 
-// 前端不再直接使用真实 API Key，改为调用 Netlify Function 代理
-const API_URL = '/.netlify/functions/chat';
+// 调用 Netlify Edge Function 代理接口
+const API_URL = '/api/chat';
 
 export interface StreamCallbacks {
   onChunk: (chunk: string) => void;
@@ -85,19 +85,24 @@ export async function sendMessageStream(
     });
 
     if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      const errorMsg = errorData.error || errorData.message || `HTTP ${response.status}`;
+      const errorText = await response.text().catch(() => 'Unknown error');
+      let errorMsg = `HTTP ${response.status}`;
+      try {
+        const parsed = JSON.parse(errorText);
+        errorMsg = parsed.error || parsed.message || errorMsg;
+      } catch {
+        errorMsg = errorText || errorMsg;
+      }
       throw new Error(errorMsg);
     }
 
     const data = await response.json().catch(() => null);
-    const content = data?.content || data?.choices?.[0]?.message?.content || '';
+    const content = data?.content || data?.choices?.[0]?.message?.content || data?.choices?.[0]?.text || '';
 
     if (!content) {
       throw new Error('服务器未返回有效内容');
     }
 
-    callbacks.onChunk(content);
     callbacks.onComplete(content);
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : '请求失败';

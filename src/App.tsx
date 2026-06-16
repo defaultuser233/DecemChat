@@ -18,8 +18,7 @@ function App() {
   const { 
     messages, 
     isLoading, 
-    streamingContent,
-    streamingMessageId,
+    typingMessageId,
     error, 
     sendMessage, 
     clearMessages, 
@@ -69,8 +68,7 @@ function App() {
       <ChatInterface
         messages={messages}
         isLoading={isLoading}
-        streamingContent={streamingContent}
-        streamingMessageId={streamingMessageId}
+        typingMessageId={typingMessageId}
         error={error}
         settings={settings}
         onSendMessage={sendMessage}

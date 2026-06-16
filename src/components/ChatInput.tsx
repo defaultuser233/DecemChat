@@ -35,9 +35,10 @@ export function ChatInput({ onSendMessage, isLoading }: ChatInputProps) {
     setInput('');
     setImagePreview(null);
     
-    // Reset textarea height
+    // Reset textarea height and keep cursor focus
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
+      textareaRef.current.focus();
     }
   }, [input, imagePreview, isLoading, onSendMessage]);
 
@@ -126,7 +127,6 @@ export function ChatInput({ onSendMessage, isLoading }: ChatInputProps) {
           onFocus={() => setIsFocused(true)}
           onBlur={() => setIsFocused(false)}
           placeholder={imagePreview ? '添加描述（可选）...' : '发个消息聊聊呗～'}
-          disabled={isLoading}
           rows={1}
           className="flex-1 bg-transparent border-none resize-none py-2.5 px-2 text-sm placeholder:text-muted-foreground focus:outline-none min-h-[40px] max-h-[120px]"
         />
