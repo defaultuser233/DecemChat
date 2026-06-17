@@ -32,7 +32,6 @@ function formatMessages(messages: Message[], model: string): any[] {
   for (const msg of recentMessages) {
     // Handle messages with images for vision models
     if (msg.imageUrl && isVisionModel(model)) {
-      // For vision models, use the proper image format
       formattedMessages.push({
         role: msg.role,
         content: [
