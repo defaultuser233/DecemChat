@@ -16,7 +16,7 @@ export default async (request: Request) => {
     });
   }
 
-  let payload: { model?: string; messages?: any[] };
+  let payload: unknown;
   try {
     payload = await request.json();
   } catch (error) {
@@ -26,7 +26,7 @@ export default async (request: Request) => {
     });
   }
 
-  const { model, messages } = payload || {};
+  const { model, messages } = (payload as { model?: string; messages?: any[] }) || {};
   if (!model || !Array.isArray(messages)) {
     return new Response(JSON.stringify({ error: 'Missing model or messages' }), {
       status: 400,
