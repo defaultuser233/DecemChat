@@ -132,7 +132,6 @@ export function useChat(model: string) {
       // 根据模型上下文窗口动态调整保留的历史消息数
       const modelInfo = AVAILABLE_MODELS.find(m => m.id === model);
       const historyLimit = modelInfo?.maxHistoryMessages ?? 10;
-      const history = nextMessages.slice(-historyLimit);
 
       try {
         const history = messages.slice(-historyLimit);
