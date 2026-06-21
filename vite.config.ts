@@ -51,12 +51,8 @@ export default defineConfig({
             return 'react-markdown-vendor';
           }
 
-          if (pkgName === 'highlight.js') {
-            return 'highlight-vendor';
-          }
-
-          if (pkgName.startsWith('rehype') || pkgName.startsWith('remark')) {
-            return 'md-plugins-vendor';
+          if (pkgName === 'react-markdown' || pkgName.startsWith('rehype') || pkgName.startsWith('remark')) {
+            return 'react-markdown-vendor';
           }
 
           if (
