@@ -101,6 +101,12 @@ export const AVAILABLE_MODELS: AIModel[] = [
     name: 'GLM-5.1',
     description: '🐼整理竹子的熊猫',
     contextWindow: 262144
+  },
+  {
+    id: 'glm-5.2',
+    name: 'GLM-5.2',
+    description: '🌱更聪明的熊猫，理解更深，响应更稳',
+    contextWindow: 262144
   }
 ];
 

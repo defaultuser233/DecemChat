@@ -145,7 +145,8 @@ export function getModelDisplayName(modelId: string): string {
     'deepseek-v4-pro': 'DeepSeek-V4-Pro',
     'deepseek-v4-flash': 'DeepSeek-V4-Flash',
     'kimi-k2.6': 'Kimi-K2.6',
-    'glm-5.1': 'GLM-5.1'
+    'glm-5.1': 'GLM-5.1',
+    'glm-5.2': 'GLM-5.2'
   };
   return modelMap[modelId] || modelId;
 }
