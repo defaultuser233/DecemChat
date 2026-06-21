@@ -5,6 +5,7 @@ import { sendMessageStream } from '@/services/aiApi';
 import { saveImage, loadImage, clearAllImages } from '@/services/imageDB';
 
 const CHAT_STORAGE_KEY = 'decem-chat-messages';
+const DEFAULT_HISTORY_LIMIT = 20;
 
 // 从localStorage加载聊天记录（纯文字，不含图片base64）
 function loadMessagesFromStorage(): Message[] | null {
@@ -129,9 +130,7 @@ export function useChat(model: string) {
 
       let fullResponse = '';
 
-      // 根据模型上下文窗口动态调整保留的历史消息数
-      const modelInfo = AVAILABLE_MODELS.find(m => m.id === model);
-      const historyLimit = modelInfo?.maxHistoryMessages ?? 10;
+      const historyLimit = DEFAULT_HISTORY_LIMIT;
 
       try {
         const history = messages.slice(-historyLimit);
@@ -265,8 +264,7 @@ export function useChat(model: string) {
     let fullResponse = '';
 
     try {
-      const modelInfo = AVAILABLE_MODELS.find(m => m.id === model);
-      const historyLimit = (modelInfo?.maxHistoryMessages ?? 10) + 1;
+      const historyLimit = DEFAULT_HISTORY_LIMIT + 1;
       const history = messages.slice(-historyLimit, -1);
 
       await sendMessageStream(

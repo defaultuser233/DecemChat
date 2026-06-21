@@ -14,7 +14,7 @@ interface ChatInterfaceProps {
   settings: {
     model: string;
     userAvatar: string;
-    decemAvatar: string;
+    charAvatar: string;
     isDarkMode: boolean;
   };
   onSendMessage: (content: string, imageUrl?: string) => void;
@@ -105,7 +105,7 @@ export function ChatInterface({
           {/* Decem Avatar */}
           <div className="relative">
             <img
-              src={settings.decemAvatar}
+              src={settings.charAvatar}
               alt="Decem"
               className="w-10 h-10 rounded-full object-cover border-2 border-[#95E1D3] animate-breathe"
             />
@@ -145,7 +145,7 @@ export function ChatInterface({
               <MessageBubble
                 key={message.id}
                 message={message}
-                avatar={message.role === 'user' ? settings.userAvatar : settings.decemAvatar}
+                avatar={message.role === 'user' ? settings.userAvatar : settings.charAvatar}
                 isStreaming={isTyping}
                 onRegenerate={index === actualLastAssistantIndex ? onRegenerateResponse : undefined}
                 isLastAssistantMessage={index === actualLastAssistantIndex}

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import type { ChatSettings } from '@/types';
-import { DEFAULT_SETTINGS } from '@/types';
+import { DEFAULT_SETTINGS, getRandomCharAvatar, getRandomUserAvatar } from '@/types';
 
 const STORAGE_KEY = 'decem-chat-settings';
 
@@ -14,12 +14,12 @@ export function useSettings() {
       const saved = localStorage.getItem(STORAGE_KEY);
       if (saved) {
         const parsed = JSON.parse(saved);
-        // 恢复设置，但头像路径强制使用默认值（避免旧路径缓存导致头像丢失）
+        // 恢复设置，但用户和 Decem 头像每次重新加载时都随机。
         setSettings({
           ...DEFAULT_SETTINGS,
           ...parsed,
-          userAvatar: DEFAULT_SETTINGS.userAvatar,
-          decemAvatar: DEFAULT_SETTINGS.decemAvatar
+          userAvatar: getRandomUserAvatar(),
+          charAvatar: getRandomCharAvatar()
         });
       }
     } catch (error) {
@@ -47,8 +47,8 @@ export function useSettings() {
     setSettings(prev => ({ ...prev, userAvatar: avatar }));
   }, []);
 
-  const updateDecemAvatar = useCallback((avatar: string) => {
-    setSettings(prev => ({ ...prev, decemAvatar: avatar }));
+  const updateCharAvatar = useCallback((avatar: string) => {
+    setSettings(prev => ({ ...prev, charAvatar: avatar }));
   }, []);
 
   const toggleDarkMode = useCallback(() => {
@@ -68,7 +68,7 @@ export function useSettings() {
     isLoaded,
     updateModel,
     updateUserAvatar,
-    updateDecemAvatar,
+    updateCharAvatar,
     toggleDarkMode,
     setDarkMode,
     resetSettings
