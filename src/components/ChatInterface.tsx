@@ -1,5 +1,5 @@
 import { useRef, useEffect, useState } from 'react';
-import { Settings, Sparkles } from 'lucide-react';
+import { Github, Settings, Sparkles } from 'lucide-react';
 import type { Message } from '@/types';
 import { MessageBubble } from './MessageBubble';
 import { ChatInput } from './ChatInput';
@@ -124,13 +124,26 @@ export function ChatInterface({
           </div>
         </div>
 
-        {/* Settings Button */}
-        <button
-          onClick={() => setIsSettingsOpen(true)}
-          className="p-2.5 rounded-xl hover:bg-muted transition-all duration-300 hover:rotate-90"
-        >
-          <Settings className="w-5 h-5" />
-        </button>
+        <div className="flex items-center gap-2">
+          <a
+            href="https://github.com/defaultuser233/DecemChat"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="p-2.5 rounded-xl hover:bg-muted transition-all duration-300"
+            aria-label="GitHub 仓库"
+          >
+            <Github className="w-5 h-5" />
+          </a>
+
+          {/* Settings Button */}
+          <button
+            onClick={() => setIsSettingsOpen(true)}
+            className="p-2.5 rounded-xl hover:bg-muted transition-all duration-300 hover:rotate-90"
+            aria-label="打开设置"
+          >
+            <Settings className="w-5 h-5" />
+          </button>
+        </div>
       </header>
 
       {/* Chat Messages - Scrollable middle area */}
