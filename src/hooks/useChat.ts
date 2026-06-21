@@ -1,6 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import type { Message } from '@/types';
-import { AVAILABLE_MODELS } from '@/types';
 import { sendMessageStream } from '@/services/aiApi';
 import { saveImage, loadImage, clearAllImages } from '@/services/imageDB';
 
