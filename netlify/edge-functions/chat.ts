@@ -12,7 +12,18 @@ export default async (request: Request) => {
     return jsonResponse({ error: 'Method Not Allowed' }, 405);
   }
 
-  const apiKey = process.env.API_KEY || process.env.DASHSCOPE_API_KEY || process.env.NETLIFY_API_KEY;
+  // 兼容 Netlify Edge Functions 的 Deno 运行时与本地 Node 环境
+  const getEnv = (name: string): string | undefined => {
+    const g = globalThis as unknown as {
+      Deno?: { env?: { get?: (k: string) => string | undefined } };
+      process?: { env?: Record<string, string | undefined> };
+    };
+    const denoValue = g.Deno?.env?.get?.(name);
+    if (denoValue) return denoValue;
+    return g.process?.env?.[name];
+  };
+
+  const apiKey = getEnv('API_KEY') || getEnv('DASHSCOPE_API_KEY') || getEnv('NETLIFY_API_KEY');
   if (!apiKey) {
     return jsonResponse({ error: 'Server API key is not configured' }, 500);
   }
