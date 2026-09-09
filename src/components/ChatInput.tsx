@@ -1,15 +1,20 @@
 import { useState, useRef, useCallback } from 'react';
 import { Send, Image, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { extractGifGrid } from '@/services/gifFrames';
 
 interface ChatInputProps {
-  onSendMessage: (content: string, imageUrl?: string) => void;
+  onSendMessage: (content: string, imageUrl?: string, hint?: string) => void;
   isLoading: boolean;
 }
 
 export function ChatInput({ onSendMessage, isLoading }: ChatInputProps) {
   const [input, setInput] = useState('');
   const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const [imageToSend, setImageToSend] = useState<string | null>(null);
+  const [isGif, setIsGif] = useState(false);
+  const [isExtracting, setIsExtracting] = useState(false);
+  const [gifFrameCount, setGifFrameCount] = useState<number | null>(null);
   const [isFocused, setIsFocused] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
@@ -29,18 +34,28 @@ export function ChatInput({ onSendMessage, isLoading }: ChatInputProps) {
   };
 
   const handleSend = useCallback(() => {
-    if ((!input.trim() && !imagePreview) || isLoading) return;
-    
-    onSendMessage(input.trim(), imagePreview || undefined);
+    if ((!input.trim() && !imagePreview) || isLoading || isExtracting) return;
+
+    const sendImage = imageToSend || imagePreview || undefined;
+    const hint =
+      sendImage && gifFrameCount !== null
+        ? `[此图为GIF动图抽取的${gifFrameCount}帧拼接，按时间先后顺序排列]`
+        : undefined;
+
+    onSendMessage(input.trim(), sendImage, hint);
     setInput('');
     setImagePreview(null);
-    
+    setImageToSend(null);
+    setIsGif(false);
+    setGifFrameCount(null);
+    setIsExtracting(false);
+
     // Reset textarea height and keep cursor focus
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
       textareaRef.current.focus();
     }
-  }, [input, imagePreview, isLoading, onSendMessage]);
+  }, [input, imagePreview, imageToSend, gifFrameCount, isLoading, isExtracting, onSendMessage]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -51,23 +66,52 @@ export function ChatInput({ onSendMessage, isLoading }: ChatInputProps) {
 
   const handleImageSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      // Check file size (max 5MB)
-      if (file.size > 5 * 1024 * 1024) {
-        alert('图片大小不能超过5MB');
+    if (!file) return;
+
+    // Check file size (max 5MB)
+    if (file.size > 5 * 1024 * 1024) {
+      alert('图片大小不能超过5MB');
+      return;
+    }
+
+    const isGifFile = file.type === 'image/gif';
+    setIsGif(isGifFile);
+    setGifFrameCount(null);
+    setImageToSend(null);
+    setIsExtracting(isGifFile);
+
+    const reader = new FileReader();
+    reader.onloadend = async () => {
+      const dataUrl = reader.result as string;
+
+      if (!isGifFile) {
+        setImagePreview(dataUrl);
+        setImageToSend(dataUrl);
         return;
       }
-      
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        setImagePreview(reader.result as string);
-      };
-      reader.readAsDataURL(file);
-    }
+
+      // GIF：抽帧期间先显示原图，完成后替换为拼接网格图
+      setImagePreview(dataUrl);
+      const result = await extractGifGrid(file);
+      if (result) {
+        setImagePreview(result.dataUrl);
+        setImageToSend(result.dataUrl);
+        setGifFrameCount(result.frameCount);
+      } else {
+        // 抽帧失败则回退为原图（模型只会看到首帧）
+        setImageToSend(dataUrl);
+      }
+      setIsExtracting(false);
+    };
+    reader.readAsDataURL(file);
   }, []);
 
   const clearImage = useCallback(() => {
     setImagePreview(null);
+    setImageToSend(null);
+    setIsGif(false);
+    setGifFrameCount(null);
+    setIsExtracting(false);
     if (imageInputRef.current) {
       imageInputRef.current.value = '';
     }
@@ -91,11 +135,20 @@ export function ChatInput({ onSendMessage, isLoading }: ChatInputProps) {
               <X className="w-3 h-3" />
             </button>
           </div>
+          {isGif && (
+            <p className="mt-1 text-xs text-[#FCE38A]">
+              {isExtracting
+                ? '正在抽取 GIF 帧…'
+                : gifFrameCount !== null
+                  ? `GIF 已抽取 ${gifFrameCount} 帧，发送时将以拼接图识别`
+                  : 'GIF 将按静态首帧发送'}
+            </p>
+          )}
         </div>
       )}
 
       {/* Input Area */}
-      <div 
+      <div
         className={`flex items-end gap-2 bg-muted/50 rounded-2xl p-2 transition-all duration-300 ${
           isFocused ? 'ring-2 ring-[#F38181]/30' : ''
         }`}
@@ -134,7 +187,7 @@ export function ChatInput({ onSendMessage, isLoading }: ChatInputProps) {
         {/* Send Button */}
         <Button
           onClick={handleSend}
-          disabled={(!input.trim() && !imagePreview) || isLoading}
+          disabled={(!input.trim() && !imagePreview) || isLoading || isExtracting}
           size="icon"
           className={`flex-shrink-0 w-10 h-10 rounded-xl transition-all duration-300 ${
             (input.trim() || imagePreview) && !isLoading

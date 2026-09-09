@@ -1,10 +1,21 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import type { Message } from '@/types';
-import { sendMessageStream } from '@/services/aiApi';
+import { sendMessageStream, NO_CONTENT_ERROR } from '@/services/aiApi';
 import { saveImage, loadImage, clearAllImages } from '@/services/imageDB';
 
 const CHAT_STORAGE_KEY = 'decem-chat-messages';
 const DEFAULT_HISTORY_LIMIT = 20;
+const WELCOME_MESSAGE_ID = 'welcome';
+const WELCOME_MESSAGE_CONTENT = '🦊狐狐来啦～(≧▽≦)/～💗你终于来找我玩啦！嗷呜～';
+
+function createWelcomeMessage(): Message {
+  return {
+    id: WELCOME_MESSAGE_ID,
+    role: 'assistant',
+    content: WELCOME_MESSAGE_CONTENT,
+    timestamp: Date.now(),
+  };
+}
 
 // 从localStorage加载聊天记录（纯文字，不含图片base64）
 function loadMessagesFromStorage(): Message[] | null {
@@ -40,14 +51,7 @@ function saveMessagesToStorage(messages: Message[]) {
 export function useChat(model: string) {
   const [messages, setMessages] = useState<Message[]>(() => {
     const saved = loadMessagesFromStorage();
-    return saved || [
-      {
-        id: 'welcome',
-        role: 'assistant',
-        content: '🦊狐狐来啦～(≧▽≦)/～💗你终于来找我玩啦！嗷呜～',
-        timestamp: Date.now(),
-      },
-    ];
+    return saved || [createWelcomeMessage()];
   });
 
   const [isLoading, setIsLoading] = useState(false);
@@ -84,7 +88,7 @@ export function useChat(model: string) {
   }, [messages]);
 
   const sendMessage = useCallback(
-    async (content: string, imageUrl?: string) => {
+    async (content: string, imageUrl?: string, hint?: string) => {
       if ((!content.trim() && !imageUrl) || isLoading) return;
 
       if (abortControllerRef.current) {
@@ -100,6 +104,7 @@ export function useChat(model: string) {
         timestamp: Date.now(),
         imageUrl,
         imagePath: imageUrl ? 'stored' : undefined,
+        hint,
       };
 
       // 如果有图片，先存到 IndexedDB
@@ -151,7 +156,7 @@ export function useChat(model: string) {
         );
 
         if (!fullResponse) {
-          throw new Error('服务器未返回有效内容');
+          throw new Error(NO_CONTENT_ERROR);
         }
 
         const targetText = fullResponse;
@@ -215,14 +220,7 @@ export function useChat(model: string) {
   );
 
   const clearMessages = useCallback(() => {
-    setMessages([
-      {
-        id: 'welcome',
-        role: 'assistant',
-        content: '🦊狐狐来啦～(≧▽≦)/～💗你终于来找我玩啦！嗷呜～',
-        timestamp: Date.now(),
-      },
-    ]);
+    setMessages([createWelcomeMessage()]);
     setError(null);
     setTypingMessageId(null);
     if (typingTimerRef.current) {
@@ -283,7 +281,7 @@ export function useChat(model: string) {
       );
 
       if (!fullResponse) {
-        throw new Error('服务器未返回有效内容');
+        throw new Error(NO_CONTENT_ERROR);
       }
 
       const targetText = fullResponse;

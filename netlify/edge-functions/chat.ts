@@ -1,37 +1,33 @@
 const API_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions';
 
+// 统一返回 JSON 响应，避免重复的 Content-Type 头与序列化代码
+const jsonResponse = (body: unknown, status = 200) =>
+  new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+
 export default async (request: Request) => {
   if (request.method !== 'POST') {
-    return new Response(JSON.stringify({ error: 'Method Not Allowed' }), {
-      status: 405,
-      headers: { 'Content-Type': 'application/json' },
-    });
+    return jsonResponse({ error: 'Method Not Allowed' }, 405);
   }
 
   const apiKey = process.env.API_KEY || process.env.DASHSCOPE_API_KEY || process.env.NETLIFY_API_KEY;
   if (!apiKey) {
-    return new Response(JSON.stringify({ error: 'Server API key is not configured' }), {
-      status: 500,
-      headers: { 'Content-Type': 'application/json' },
-    });
+    return jsonResponse({ error: 'Server API key is not configured' }, 500);
   }
 
   let payload: unknown;
   try {
     payload = await request.json();
   } catch (error) {
-    return new Response(JSON.stringify({ error: 'Invalid JSON body' }), {
-      status: 400,
-      headers: { 'Content-Type': 'application/json' },
-    });
+    return jsonResponse({ error: 'Invalid JSON body' }, 400);
   }
 
-  const { model, messages } = (payload as { model?: string; messages?: any[] }) || {};
+  const { model, messages, temperature } =
+    (payload as { model?: string; messages?: any[]; temperature?: number }) || {};
   if (!model || !Array.isArray(messages)) {
-    return new Response(JSON.stringify({ error: 'Missing model or messages' }), {
-      status: 400,
-      headers: { 'Content-Type': 'application/json' },
-    });
+    return jsonResponse({ error: 'Missing model or messages' }, 400);
   }
 
   const externalResponse = await fetch(API_URL, {
@@ -44,7 +40,8 @@ export default async (request: Request) => {
       model,
       messages,
       stream: false,
-      temperature: 0.8,
+      // temperature 仅在调用方显式传入时下发，避免对不支持该参数的模型报错
+      ...(typeof temperature === 'number' ? { temperature } : {}),
       max_tokens: 1500,
       enable_thinking: false,
     }),
@@ -55,28 +52,20 @@ export default async (request: Request) => {
   try {
     responseData = JSON.parse(responseText);
   } catch {
-    return new Response(JSON.stringify({ error: 'Invalid response from AI provider' }), {
-      status: 502,
-      headers: { 'Content-Type': 'application/json' },
-    });
+    return jsonResponse({ error: 'Invalid response from AI provider' }, 502);
   }
 
   if (!externalResponse.ok) {
-    return new Response(JSON.stringify({ error: responseData.error?.message || responseData.message || 'AI provider request failed' }), {
-      status: externalResponse.status,
-      headers: { 'Content-Type': 'application/json' },
-    });
+    return jsonResponse(
+      { error: responseData.error?.message || responseData.message || 'AI provider request failed' },
+      externalResponse.status,
+    );
   }
 
   const content = responseData?.choices?.[0]?.message?.content || responseData?.choices?.[0]?.text || responseData?.content || '';
   if (!content) {
-    return new Response(JSON.stringify({ error: 'AI provider returned no content' }), {
-      status: 502,
-      headers: { 'Content-Type': 'application/json' },
-    });
+    return jsonResponse({ error: 'AI provider returned no content' }, 502);
   }
 
-  return new Response(JSON.stringify({ content, meta: responseData }), {
-    headers: { 'Content-Type': 'application/json' },
-  });
+  return jsonResponse({ content, meta: responseData });
 };

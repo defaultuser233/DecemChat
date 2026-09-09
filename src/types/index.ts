@@ -5,6 +5,7 @@ export interface Message {
   timestamp: number;
   imageUrl?: string;
   imagePath?: string;
+  hint?: string; // 仅发送给模型、不在界面展示的额外上下文
 }
 
 export interface ChatSettings {
@@ -21,6 +22,7 @@ export interface AIModel {
   description: string;
   avatar?: string;
   supportsVision?: boolean;
+  supportsTemperature?: boolean; // 是否支持 temperature 参数（部分三方模型不支持）
   contextWindow?: number; // 上下文窗口长度（token 数）
 }
 
@@ -86,6 +88,7 @@ export const AVAILABLE_MODELS: AIModel[] = [
     name: 'Kimi-K3',
     description: '🌕寻求将能源转化为智能的最优解',
     supportsVision: true,
+    supportsTemperature: false,
     contextWindow: 262144
   },
   // 智谱 GLM 模型 (1M上下文)

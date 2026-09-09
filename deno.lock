@@ -52,6 +52,7 @@
         "npm:eslint-plugin-react-hooks@^7.0.1",
         "npm:eslint-plugin-react-refresh@~0.4.24",
         "npm:eslint@^9.39.1",
+        "npm:gifuct-js@^2.1.2",
         "npm:globals@^16.5.0",
         "npm:highlight.js@^11.11.1",
         "npm:input-otp@^1.4.2",

@@ -17,7 +17,7 @@ interface ChatInterfaceProps {
     charAvatar: string;
     isDarkMode: boolean;
   };
-  onSendMessage: (content: string, imageUrl?: string) => void;
+  onSendMessage: (content: string, imageUrl?: string, hint?: string) => void;
   onClearMessages: () => void;
   onRegenerateResponse: () => void;
   onUpdateModel: (model: string) => void;

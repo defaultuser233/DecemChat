@@ -5,6 +5,12 @@ import { SYSTEM_PROMPT } from './SYSTEM_PROMPT';
 // 调用 Netlify Edge Function 代理接口
 const API_URL = '/api/chat';
 
+// 图片消息没有文字描述时使用的默认提示
+const DEFAULT_IMAGE_PROMPT = '看看这张图片～';
+
+// 服务器未返回有效内容时的错误信息
+export const NO_CONTENT_ERROR = '服务器未返回有效内容';
+
 export interface StreamCallbacks {
   onChunk: (chunk: string) => void;
   onComplete: (fullContent: string) => void;
@@ -15,6 +21,12 @@ export interface StreamCallbacks {
 function isVisionModel(model: string): boolean {
   const modelInfo = AVAILABLE_MODELS.find(m => m.id === model);
   return modelInfo?.supportsVision ?? false;
+}
+
+// Check if model supports temperature parameter (defaults to true)
+function supportsTemperature(model: string): boolean {
+  const modelInfo = AVAILABLE_MODELS.find(m => m.id === model);
+  return modelInfo?.supportsTemperature ?? true;
 }
 
 // Format messages for API
@@ -32,12 +44,14 @@ function formatMessages(messages: Message[], model: string): any[] {
   for (const msg of recentMessages) {
     // Handle messages with images for vision models
     if (msg.imageUrl && isVisionModel(model)) {
+      const textParts = [msg.content || DEFAULT_IMAGE_PROMPT];
+      if (msg.hint) textParts.push(msg.hint);
       formattedMessages.push({
         role: msg.role,
         content: [
           {
             type: 'text',
-            text: msg.content || '看看这张图片～'
+            text: textParts.join('\n')
           },
           {
             type: 'image_url',
@@ -49,9 +63,10 @@ function formatMessages(messages: Message[], model: string): any[] {
       });
     } else if (msg.imageUrl) {
       // For non-vision models, include image reference in text
+      const text = `${msg.content || DEFAULT_IMAGE_PROMPT}${msg.hint ? `\n${msg.hint}` : ''}`;
       formattedMessages.push({
         role: msg.role,
-        content: `[图片] ${msg.content || '看看这张图片～'}`
+        content: `[图片] ${text}`
       });
     } else {
       formattedMessages.push({
@@ -72,15 +87,21 @@ export async function sendMessageStream(
   const formattedMessages = formatMessages(messages, model);
 
   try {
+    const body: Record<string, unknown> = {
+      model,
+      messages: formattedMessages
+    };
+    // 部分模型（如 kimi-k3）不支持 temperature 参数，此时不发送
+    if (supportsTemperature(model)) {
+      body.temperature = 0.8;
+    }
+
     const response = await fetch(API_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({
-        model,
-        messages: formattedMessages
-      })
+      body: JSON.stringify(body)
     });
 
     if (!response.ok) {
@@ -99,7 +120,7 @@ export async function sendMessageStream(
     const content = data?.content || data?.choices?.[0]?.message?.content || data?.choices?.[0]?.text || '';
 
     if (!content) {
-      throw new Error('服务器未返回有效内容');
+      throw new Error(NO_CONTENT_ERROR);
     }
 
     callbacks.onComplete(content);
