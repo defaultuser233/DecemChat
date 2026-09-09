@@ -137,16 +137,16 @@ export async function sendMessageToAI(
 
 export function getModelDisplayName(modelId: string): string {
   const modelMap: Record<string, string> = {
-    'qwen3.6-flash': 'Qwen3.6-Flash',
-    'qwen3.6-plus': 'Qwen3.6-Plus',
-    'qwen3.7-max': 'Qwen3.7-Max',
+    'qwen3.8-flash': 'Qwen3.8-Flash',
     'qwen3.7-plus': 'Qwen3.7-Plus',
+    'qwen3.8-max': 'Qwen3.8-Max',
     'qwen3.5-omni-plus': 'Qwen3.5-Omni-Plus',
     'deepseek-v4-pro': 'DeepSeek-V4-Pro',
     'deepseek-v4-flash': 'DeepSeek-V4-Flash',
-    'kimi-k2.6': 'Kimi-K2.6',
-    'glm-5.1': 'GLM-5.1',
-    'glm-5.2': 'GLM-5.2'
+    'kimi-k3': 'Kimi-K3',
+    'glm-5.2': 'GLM-5.2',
+    'MiniMax-M3': 'MiniMax-M3',
+    'mimo-v2.5-pro': 'MiMo-v2.5-Pro'
   };
   return modelMap[modelId] || modelId;
 }

@@ -33,41 +33,33 @@ export interface DecemPrompt {
   formatUserPrompt: string;
 }
 
-// 阿里云百炼最新模型列表（2026年）
+// 阿里云百炼最新模型列表（2026-09 更新）
 // 文档: https://help.aliyun.com/zh/model-studio/models
 export const AVAILABLE_MODELS: AIModel[] = [
-  // 千问模型 - 速度最快，免费额度，支持视觉理解 (1M上下文)
+  // 千问模型 - 速度最快，轻量低成本 (1M上下文)
   {
-    id: 'qwen3.6-flash',
-    name: 'Qwen3.6-Flash',
+    id: 'qwen3.8-flash',
+    name: 'Qwen3.8-Flash',
     description: '⚡像闪电一样快的小狐狸！适合需要快速响应的日常对话，虽然体积小但能力不弱哦～',
-    supportsVision: true,
     contextWindow: 1048576
   },
   // 千问模型 - 平衡性能，支持视觉理解 (1M上下文)
   {
-    id: 'qwen3.6-plus',
-    name: 'Qwen3.6-Plus',
+    id: 'qwen3.7-plus',
+    name: 'Qwen3.7-Plus',
     description: '🧠 更聪明的大狐狸！推理和复杂任务更强，像能同时记住浆果藏在森林的哪里、又帮松鼠算松子库存～',
     supportsVision: true,
     contextWindow: 1048576
   },
-  // 千问模型 - 最强能力 (1M上下文)
+  // 千问模型 - 最强能力，支持视觉理解 (1M上下文)
   {
-    id: 'qwen3.7-max',
-    name: 'Qwen3.7-Max',
+    id: 'qwen3.8-max',
+    name: 'Qwen3.8-Max',
     description: '🏆森林里的智者！综合能力最强，能写诗、解谜、画地图，还会用尾巴尖编复杂的故事～',
-    contextWindow: 1048576
-  },
-  // 千问模型 - 强能力+视觉理解 (1M上下文)
-  {
-    id: 'qwen3.7-plus',
-    name: 'Qwen3.7-Plus',
-    description: '🔭擅长观察的狐狸天文学家！推理和视觉理解都很强，能用望远镜看懂星空照片～',
     supportsVision: true,
     contextWindow: 1048576
   },
-  // 千问全模态模型 - 支持视觉理解 (1M上下文)
+  // 千问全模态模型 - 支持视觉理解
   {
     id: 'qwen3.5-omni-plus',
     name: 'Qwen3.5-Omni-Plus',
@@ -88,25 +80,33 @@ export const AVAILABLE_MODELS: AIModel[] = [
     description: '🐳小鲸鱼最好了',
     contextWindow: 1048576
   },
-  // 其他第三方模型 (超长上下文)
+  // Kimi 模型 - 支持视觉理解
   {
-    id: 'kimi-k2.6',
-    name: 'Kimi-K2.6',
+    id: 'kimi-k3',
+    name: 'Kimi-K3',
     description: '🌕寻求将能源转化为智能的最优解',
     supportsVision: true,
     contextWindow: 262144
   },
-  {
-    id: 'glm-5.1',
-    name: 'GLM-5.1',
-    description: '🐼整理竹子的熊猫',
-    contextWindow: 262144
-  },
+  // 智谱 GLM 模型 (1M上下文)
   {
     id: 'glm-5.2',
     name: 'GLM-5.2',
-    description: '🌱更聪明的熊猫，理解更深，响应更稳',
-    contextWindow: 262144
+    description: '🐼整理竹子的熊猫',
+    contextWindow: 1048576
+  },
+  // MiniMax 模型
+  {
+    id: 'MiniMax-M3',
+    name: 'MiniMax-M3',
+    description: '🌊来自深海的吟游诗人，文笔流畅、情感细腻',
+    contextWindow: 196608
+  },
+  {
+    id: 'mimo-v2.5-pro',
+    name: 'MiMo-v2.5-Pro',
+    description: '🫧小水母的灵感泡泡，创意与效率兼得',
+    contextWindow: 1048576
   }
 ];
 
@@ -132,7 +132,7 @@ export const getRandomUserAvatar = () => {
 };
 
 export const DEFAULT_SETTINGS: ChatSettings = {
-  model: 'qwen3.6-flash',
+  model: 'qwen3.8-flash',
   charAvatar: getRandomCharAvatar(),
   userAvatar: getRandomUserAvatar(),
   isDarkMode: true,

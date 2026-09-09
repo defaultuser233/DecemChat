@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import type { ChatSettings } from '@/types';
-import { DEFAULT_SETTINGS, getRandomCharAvatar, getRandomUserAvatar } from '@/types';
+import { AVAILABLE_MODELS, DEFAULT_SETTINGS, getRandomCharAvatar, getRandomUserAvatar } from '@/types';
 
 const STORAGE_KEY = 'decem-chat-settings';
 
@@ -15,9 +15,15 @@ export function useSettings() {
       if (saved) {
         const parsed = JSON.parse(saved);
         // 恢复设置，但用户和 Decem 头像每次重新加载时都随机。
+        // 兼容旧版本：若保存的模型 ID 已不在可用列表中，回退到默认模型。
+        const savedModel = parsed?.model;
+        const isValidModel =
+          typeof savedModel === 'string' &&
+          AVAILABLE_MODELS.some(m => m.id === savedModel);
         setSettings({
           ...DEFAULT_SETTINGS,
           ...parsed,
+          model: isValidModel ? savedModel : DEFAULT_SETTINGS.model,
           userAvatar: getRandomUserAvatar(),
           charAvatar: getRandomCharAvatar()
         });
