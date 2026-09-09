@@ -79,6 +79,64 @@ function formatMessages(messages: Message[], model: string): any[] {
   return formattedMessages;
 }
 
+// 解析 DashScope 兼容模式返回的 SSE 流
+async function consumeSSE(
+  body: ReadableStream<Uint8Array>,
+  callbacks: StreamCallbacks
+): Promise<void> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let buffer = '';
+  let fullContent = '';
+  let finished = false;
+
+  const handleLine = (line: string) => {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('data:')) return;
+    const data = trimmed.slice(5).trim();
+    if (data === '[DONE]') {
+      finished = true;
+      return;
+    }
+    try {
+      const json = JSON.parse(data);
+      const delta = json?.choices?.[0]?.delta?.content;
+      const full = json?.choices?.[0]?.message?.content;
+      if (typeof delta === 'string' && delta) {
+        fullContent += delta;
+        callbacks.onChunk(delta);
+      } else if (typeof full === 'string' && full) {
+        fullContent = full;
+      }
+    } catch {
+      // 忽略无法解析的行
+    }
+  };
+
+  while (!finished) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() ?? '';
+    for (const line of lines) {
+      handleLine(line);
+    }
+  }
+  // 处理剩余的 buffer
+  buffer += decoder.decode();
+  if (buffer.trim()) {
+    for (const line of buffer.split('\n')) {
+      handleLine(line);
+    }
+  }
+
+  if (!fullContent) {
+    throw new Error(NO_CONTENT_ERROR);
+  }
+  callbacks.onComplete(fullContent);
+}
+
 export async function sendMessageStream(
   messages: Message[],
   model: string,
@@ -116,14 +174,22 @@ export async function sendMessageStream(
       throw new Error(errorMsg);
     }
 
-    const data = await response.json().catch(() => null);
-    const content = data?.content || data?.choices?.[0]?.message?.content || data?.choices?.[0]?.text || '';
-
-    if (!content) {
-      throw new Error(NO_CONTENT_ERROR);
+    // 优先按 SSE 流解析，回退到 JSON
+    const contentType = response.headers.get('content-type') || '';
+    if (contentType.includes('text/event-stream') && response.body) {
+      await consumeSSE(response.body, callbacks);
+    } else {
+      const data = await response.json().catch(() => null);
+      const content =
+        data?.content ||
+        data?.choices?.[0]?.message?.content ||
+        data?.choices?.[0]?.text ||
+        '';
+      if (!content) {
+        throw new Error(NO_CONTENT_ERROR);
+      }
+      callbacks.onComplete(content);
     }
-
-    callbacks.onComplete(content);
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : '请求失败';
     callbacks.onError(`API 请求失败: ${errorMessage}`);

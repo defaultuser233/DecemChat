@@ -50,7 +50,7 @@ export default async (request: Request) => {
     body: JSON.stringify({
       model,
       messages,
-      stream: false,
+      stream: true,
       // temperature 仅在调用方显式传入时下发，避免对不支持该参数的模型报错
       ...(typeof temperature === 'number' ? { temperature } : {}),
       max_tokens: 1500,
@@ -58,25 +58,25 @@ export default async (request: Request) => {
     }),
   });
 
-  const responseText = await externalResponse.text();
-  let responseData: any;
-  try {
-    responseData = JSON.parse(responseText);
-  } catch {
-    return jsonResponse({ error: 'Invalid response from AI provider' }, 502);
+  if (!externalResponse.ok || !externalResponse.body) {
+    const text = await externalResponse.text().catch(() => '');
+    let message = 'AI provider request failed';
+    try {
+      const data = JSON.parse(text);
+      message = data?.error?.message || data?.message || message;
+    } catch {
+      // 忽略解析失败
+    }
+    return jsonResponse({ error: message }, externalResponse.status || 502);
   }
 
-  if (!externalResponse.ok) {
-    return jsonResponse(
-      { error: responseData.error?.message || responseData.message || 'AI provider request failed' },
-      externalResponse.status,
-    );
-  }
-
-  const content = responseData?.choices?.[0]?.message?.content || responseData?.choices?.[0]?.text || responseData?.content || '';
-  if (!content) {
-    return jsonResponse({ error: 'AI provider returned no content' }, 502);
-  }
-
-  return jsonResponse({ content, meta: responseData });
+  // 透传 SSE 流给前端，边缘函数不再阻塞等待完整结果
+  return new Response(externalResponse.body, {
+    status: 200,
+    headers: {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+    },
+  });
 };
