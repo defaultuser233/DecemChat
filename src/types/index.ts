@@ -38,11 +38,12 @@ export interface DecemPrompt {
 // 阿里云百炼最新模型列表（2026-09 更新）
 // 文档: https://help.aliyun.com/zh/model-studio/models
 export const AVAILABLE_MODELS: AIModel[] = [
-  // 千问模型 - 速度最快，轻量低成本 (1M上下文)
+  // 千问模型 - 速度最快，轻量低成本，支持视觉理解 (1M上下文)
   {
     id: 'qwen3.8-flash',
     name: 'Qwen3.8-Flash',
     description: '⚡像闪电一样快的小狐狸！适合需要快速响应的日常对话，虽然体积小但能力不弱哦～',
+    supportsVision: true,
     contextWindow: 1048576
   },
   // 千问模型 - 平衡性能，支持视觉理解 (1M上下文)
