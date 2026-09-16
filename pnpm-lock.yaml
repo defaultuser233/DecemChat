@@ -164,6 +164,9 @@ importers:
       tsconfig-paths:
         specifier: ^4.2.0
         version: 4.2.0
+      tsx:
+        specifier: ^4.23.13
+        version: 4.23.13
       vaul:
         specifier: ^1.1.2
         version: 1.1.2(@types/react-dom@19.2.7(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
@@ -206,7 +209,7 @@ importers:
         version: 16.5.0
       kimi-plugin-inspect-react:
         specifier: ^1.0.3
-        version: 1.0.3(vite@7.3.5(@types/node@24.13.2)(jiti@1.21.7)(tsx@4.23.13)(yaml@2.9.0))
+        version: 1.0.3(supports-color@10.2.2)(vite@7.3.5(@types/node@24.13.2)(jiti@1.21.7)(tsx@4.23.13)(yaml@2.9.0))
       netlify-cli:
         specifier: ^26.1.0
         version: 26.1.0(@types/node@24.13.2)(picomatch@4.0.4)(rollup@4.61.1)(supports-color@10.2.2)
@@ -219,9 +222,6 @@ importers:
       tailwindcss-animate:
         specifier: ^1.0.7
         version: 1.0.7(tailwindcss@3.4.19(tsx@4.23.13)(yaml@2.9.0))
-      tsx:
-        specifier: ^4.23.13
-        version: 4.23.13
       tw-animate-css:
         specifier: ^1.4.0
         version: 1.4.0
@@ -7591,7 +7591,7 @@ snapshots:
       regexpu-core: 6.4.0
       semver: 6.3.1
 
-  '@babel/helper-define-polyfill-provider@0.6.8(@babel/core@7.29.7)':
+  '@babel/helper-define-polyfill-provider@0.6.8(@babel/core@7.29.7)(supports-color@10.2.2)':
     dependencies:
       '@babel/core': 7.29.7
       '@babel/helper-compilation-targets': 7.29.7
@@ -8151,7 +8151,7 @@ snapshots:
       '@babel/helper-create-regexp-features-plugin': 7.29.7(@babel/core@7.29.7)
       '@babel/helper-plugin-utils': 7.29.7
 
-  '@babel/preset-env@7.29.7(@babel/core@7.29.7)':
+  '@babel/preset-env@7.29.7(@babel/core@7.29.7)(supports-color@10.2.2)':
     dependencies:
       '@babel/compat-data': 7.29.7
       '@babel/core': 7.29.7
@@ -8220,7 +8220,7 @@ snapshots:
       '@babel/plugin-transform-unicode-regex': 7.29.7(@babel/core@7.29.7)
       '@babel/plugin-transform-unicode-sets-regex': 7.29.7(@babel/core@7.29.7)
       '@babel/preset-modules': 0.1.6-no-external-plugins(@babel/core@7.29.7)
-      babel-plugin-polyfill-corejs2: 0.4.17(@babel/core@7.29.7)
+      babel-plugin-polyfill-corejs2: 0.4.17(@babel/core@7.29.7)(supports-color@10.2.2)
       babel-plugin-polyfill-corejs3: 0.14.2(@babel/core@7.29.7)
       babel-plugin-polyfill-regenerator: 0.6.8(@babel/core@7.29.7)
       core-js-compat: 3.49.0
@@ -10780,11 +10780,11 @@ snapshots:
 
   b4a@1.8.1: {}
 
-  babel-plugin-polyfill-corejs2@0.4.17(@babel/core@7.29.7):
+  babel-plugin-polyfill-corejs2@0.4.17(@babel/core@7.29.7)(supports-color@10.2.2):
     dependencies:
       '@babel/compat-data': 7.29.7
       '@babel/core': 7.29.7
-      '@babel/helper-define-polyfill-provider': 0.6.8(@babel/core@7.29.7)
+      '@babel/helper-define-polyfill-provider': 0.6.8(@babel/core@7.29.7)(supports-color@10.2.2)
       semver: 6.3.1
     transitivePeerDependencies:
       - supports-color
@@ -10792,7 +10792,7 @@ snapshots:
   babel-plugin-polyfill-corejs3@0.14.2(@babel/core@7.29.7):
     dependencies:
       '@babel/core': 7.29.7
-      '@babel/helper-define-polyfill-provider': 0.6.8(@babel/core@7.29.7)
+      '@babel/helper-define-polyfill-provider': 0.6.8(@babel/core@7.29.7)(supports-color@10.2.2)
       core-js-compat: 3.49.0
     transitivePeerDependencies:
       - supports-color
@@ -10800,7 +10800,7 @@ snapshots:
   babel-plugin-polyfill-regenerator@0.6.8(@babel/core@7.29.7):
     dependencies:
       '@babel/core': 7.29.7
-      '@babel/helper-define-polyfill-provider': 0.6.8(@babel/core@7.29.7)
+      '@babel/helper-define-polyfill-provider': 0.6.8(@babel/core@7.29.7)(supports-color@10.2.2)
     transitivePeerDependencies:
       - supports-color
 
@@ -12933,11 +12933,11 @@ snapshots:
     dependencies:
       json-buffer: 3.0.1
 
-  kimi-plugin-inspect-react@1.0.3(vite@7.3.5(@types/node@24.13.2)(jiti@1.21.7)(tsx@4.23.13)(yaml@2.9.0)):
+  kimi-plugin-inspect-react@1.0.3(supports-color@10.2.2)(vite@7.3.5(@types/node@24.13.2)(jiti@1.21.7)(tsx@4.23.13)(yaml@2.9.0)):
     dependencies:
       '@babel/core': 7.29.7
       '@babel/plugin-proposal-decorators': 7.29.7(@babel/core@7.29.7)
-      '@babel/preset-env': 7.29.7(@babel/core@7.29.7)
+      '@babel/preset-env': 7.29.7(@babel/core@7.29.7)(supports-color@10.2.2)
       '@babel/preset-react': 7.29.7(@babel/core@7.29.7)
       '@babel/preset-typescript': 7.29.7(@babel/core@7.29.7)
       '@babel/types': 7.29.7

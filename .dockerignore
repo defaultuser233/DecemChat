@@ -1,0 +1,10 @@
+node_modules
+dist
+dist-server
+.env
+.env.*
+.git
+.gitignore
+README.md
+README.md.old
+*.old
