@@ -1,0 +1,169 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>name</key>
+  <string>Decem Code</string>
+  <!--
+    与网页版一致：网页版的代码高亮来自 highlight.js 的 tokyo-night-dark 主题
+    （src/index.css 里 `@import 'highlight.js/styles/tokyo-night-dark.css'`），
+    这里把那份 CSS 的取色逐条搬到 TextMate scope 上。
+
+    注意 `background` 用的是 tokyo-night 的 #1a1b26：网页版里 `<code class="hljs">`
+    自带这个背景色，egui 这边由 syntect 主题的 background 决定，因此必须写死在这里，
+    否则会退回我们的 code_bg，比网页版偏亮偏蓝。
+  -->
+  <key>settings</key>
+  <array>
+    <dict>
+      <key>settings</key>
+      <dict>
+        <key>background</key>
+        <string>#1a1b26</string>
+        <key>foreground</key>
+        <string>#9aa5ce</string>
+        <key>caret</key>
+        <string>#c0caf5</string>
+        <key>selection</key>
+        <string>#28344a</string>
+        <key>invisibles</key>
+        <string>#565f89</string>
+        <key>lineHighlight</key>
+        <string>#1e202e</string>
+      </dict>
+    </dict>
+    <!-- 注释：.hljs-comment / .hljs-meta -->
+    <dict>
+      <key>scope</key>
+      <string>comment, punctuation.definition.comment</string>
+      <key>settings</key>
+      <dict>
+        <key>foreground</key>
+        <string>#565f89</string>
+      </dict>
+    </dict>
+    <!-- 字符串 / 符号：.hljs-string / .hljs-symbol / .hljs-bullet -->
+    <dict>
+      <key>scope</key>
+      <string>string, string.quoted, string.regexp, constant.other.symbol</string>
+      <key>settings</key>
+      <dict>
+        <key>foreground</key>
+        <string>#9ece6a</string>
+      </dict>
+    </dict>
+    <!-- 数字与布尔常量：.hljs-number / .hljs-literal -->
+    <dict>
+      <key>scope</key>
+      <string>constant.numeric, constant.language, constant.character</string>
+      <key>settings</key>
+      <dict>
+        <key>foreground</key>
+        <string>#ff9e64</string>
+      </dict>
+    </dict>
+    <!-- 控制关键字 / 存储类型：.hljs-keyword（def、return、if…） -->
+    <dict>
+      <key>scope</key>
+      <string>keyword, storage.type, storage.modifier, keyword.control, keyword.other.unit</string>
+      <key>settings</key>
+      <dict>
+        <key>foreground</key>
+        <string>#bb9af7</string>
+      </dict>
+    </dict>
+    <!-- 运算符：.hljs-operator -->
+    <dict>
+      <key>scope</key>
+      <string>keyword.operator, punctuation.definition.keyword</string>
+      <key>settings</key>
+      <dict>
+        <key>foreground</key>
+        <string>#bb9af7</string>
+      </dict>
+    </dict>
+    <!-- 内置函数（print、len…）：.hljs-built_in -->
+    <dict>
+      <key>scope</key>
+      <string>support.function, support.macro, support.constant</string>
+      <key>settings</key>
+      <dict>
+        <key>foreground</key>
+        <string>#e0af68</string>
+      </dict>
+    </dict>
+    <!-- 类型与类名：.hljs-type -->
+    <dict>
+      <key>scope</key>
+      <string>support.class, support.type, entity.name.type, entity.name.class</string>
+      <key>settings</key>
+      <dict>
+        <key>foreground</key>
+        <string>#e0af68</string>
+      </dict>
+    </dict>
+    <!-- 函数名：.hljs-title.function_ -->
+    <dict>
+      <key>scope</key>
+      <string>entity.name.function, meta.function-call, variable.function</string>
+      <key>settings</key>
+      <dict>
+        <key>foreground</key>
+        <string>#7dcfff</string>
+      </dict>
+    </dict>
+    <!-- 参数与变量：.hljs-params / .hljs-variable -->
+    <dict>
+      <key>scope</key>
+      <string>variable.parameter, variable.other, variable.language</string>
+      <key>settings</key>
+      <dict>
+        <key>foreground</key>
+        <string>#ff9e64</string>
+      </dict>
+    </dict>
+    <!-- 对象属性 / 标签名：.hljs-attr / .hljs-name -->
+    <dict>
+      <key>scope</key>
+      <string>entity.name.tag, variable.other.member, entity.other.attribute-name</string>
+      <key>settings</key>
+      <dict>
+        <key>foreground</key>
+        <string>#bb9af7</string>
+      </dict>
+    </dict>
+    <!-- 标点：.hljs-punctuation -->
+    <dict>
+      <key>scope</key>
+      <string>punctuation, punctuation.separator, punctuation.section</string>
+      <key>settings</key>
+      <dict>
+        <key>foreground</key>
+        <string>#c0caf5</string>
+      </dict>
+    </dict>
+    <!-- 类/函数定义处的高亮：.hljs-section / .hljs-title -->
+    <dict>
+      <key>scope</key>
+      <string>entity.name.section, markup.heading, markup.bold</string>
+      <key>settings</key>
+      <dict>
+        <key>foreground</key>
+        <string>#7aa2f7</string>
+        <key>fontStyle</key>
+        <string>bold</string>
+      </dict>
+    </dict>
+    <!-- 删除/插入（diff）：.hljs-deletion / .hljs-addition -->
+    <dict>
+      <key>scope</key>
+      <string>markup.deleted, markup.inserted</string>
+      <key>settings</key>
+      <dict>
+        <key>foreground</key>
+        <string>#f7768e</string>
+      </dict>
+    </dict>
+  </array>
+</dict>
+</plist>

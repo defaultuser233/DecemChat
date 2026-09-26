@@ -1,0 +1,132 @@
+name: Rust 全平台构建
+
+# Rust 版 Decem Chat 的检查与跨平台产物构建。
+# 三个平台（Windows / macOS / Linux）× 两种架构（x64 / arm64）各出一份可执行文件。
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  verify:
+    name: 检查与测试（${{ matrix.os }}）
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      # eframe/egui 在 Linux 上需要 X11 / Wayland / OpenGL 的开发库
+      - name: 安装 Linux 桌面依赖
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libgtk-3-dev libgl1-mesa-dev \
+            libwayland-dev libssl-dev pkg-config
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 格式检查
+        run: cargo fmt --all -- --check
+
+      - name: Clippy（警告视为错误）
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: 单元测试
+        run: cargo test --workspace
+
+      - name: 无界面自检（存储往返与请求编排）
+        run: cargo run -q -p decem-app -- --selftest
+
+  build:
+    name: 构建 ${{ matrix.target }}
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    # 目标平台不可用时（例如私有仓库拿不到 ubuntu-24.04-arm）应尽快失败，而不是排队挂满 6 小时
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          # ARM64 运行器上原生构建，避免交叉编译缺 GTK/OpenGL 开发库
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          # Apple 工具链自带双架构 SDK，可在 arm64 机器上出 x64 产物
+          - os: macos-latest
+            target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Linux 桌面依赖
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libgtk-3-dev libgl1-mesa-dev \
+            libwayland-dev libssl-dev pkg-config
+
+      - name: 安装 Rust 工具链与目标平台
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # ring 在「Windows + aarch64」这个组合下强制改用 clang 编译它的 C 代码
+      # （ring-0.17.14/build.rs:563-565），本机没有 clang 就会停在 cc-rs 报错。
+      - name: 确保 clang 可用（Windows/arm64 特有前提）
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v clang >/dev/null 2>&1; then
+            echo "clang 已就绪：$(clang --version | head -1)"
+          else
+            choco install llvm -y --no-progress
+            echo 'C:\Program Files\LLVM\bin' >> "$GITHUB_PATH"
+          fi
+
+      - name: 编译发布版
+        run: cargo build --release --target ${{ matrix.target }} -p decem-app
+
+      - name: 收集产物
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          case "${{ runner.os }}" in
+            Windows) cp "target/${{ matrix.target }}/release/decem-app.exe" artifacts/ ;;
+            *)      cp "target/${{ matrix.target }}/release/decem-app" artifacts/ ;;
+          esac
+          cp README.md artifacts/ 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: decem-app-${{ matrix.target }}
+          path: artifacts/*
+          if-no-files-found: error
