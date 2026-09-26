@@ -148,7 +148,7 @@ Linux 为 `~/.config/decemchat`。
 
 ### 接口地址与 API Key
 
-**默认走本项目自己的服务端代理**（`http://43.138.226.69:3000/api/chat`，网页版用的同一个），
+**默认走本项目自己的服务端代理**（`http://api.valedecem.top:3000/api/chat`，网页版用的同一个），
 API Key 留在服务器的 `.env` 里，**客户端不需要配置任何密钥**。
 
 接口地址的解析顺序：`config.json` 的 `apiUrl` → 环境变量 `DECEMCHAT_API_URL` → 上面的默认值。
