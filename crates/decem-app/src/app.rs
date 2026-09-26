@@ -40,7 +40,7 @@ pub fn resolve_api_url(saved: Option<&StoredConfig>) -> String {
 ///
 /// - 想直连百炼：把配置里的 `apiUrl` 设为空字符串，并填写 API Key
 /// - 想换服务器：改 `apiUrl`，或用环境变量 `DECEMCHAT_API_URL` 覆盖
-pub const DEFAULT_API_URL: &str = "http://api.valedecem.top:3000/api/chat";
+pub const DEFAULT_API_URL: &str = "https://api.valedecem.top:8443/api/chat";
 
 /// 代码高亮主题：内容取自网页版用的 highlight.js `tokyo-night-dark`
 /// （见 `assets/decem-code.tmTheme`）。
