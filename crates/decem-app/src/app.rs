@@ -155,6 +155,11 @@ pub struct DecemApp {
     pub api_key: String,
     /// 自定义接口地址，空字符串表示用官方地址。
     pub api_url: String,
+    /// 配置文件里**原本记着**的接口地址，保存时照原样写回。
+    ///
+    /// 记的是从 `config.json` 里读到的那一份，不是 [`resolve_api_url`] 解析出来的结果。
+    /// 否则内置默认地址会被固化进用户的配置文件，以后换默认地址，老用户的旧值永远压着新值。
+    api_url_from_config: Option<String>,
     /// 聊天消息。
     pub messages: Vec<Message>,
     /// 输入框内容。
@@ -247,6 +252,8 @@ impl DecemApp {
             .or_else(api_key_from_env)
             .unwrap_or_default();
         let api_url = resolve_api_url(saved.as_ref());
+        // 配置文件里原本写的是什么地址，就记下什么，落盘时原样写回
+        let api_url_from_config = saved.as_ref().and_then(|config| config.api_url.clone());
 
         let mut messages = store.load_messages();
         if messages.is_empty() {
@@ -268,6 +275,7 @@ impl DecemApp {
             settings,
             api_key,
             api_url,
+            api_url_from_config,
             messages,
             input: String::new(),
             pending_image: None,
@@ -532,11 +540,12 @@ impl DecemApp {
     /// 保存配置到磁盘。
     fn persist_config(&mut self) {
         let api_key = self.api_key.trim();
-        let api_url = self.api_url.trim();
         let config = StoredConfig {
             settings: self.settings.clone(),
             api_key: (!api_key.is_empty()).then(|| api_key.to_owned()),
-            api_url: (!api_url.is_empty()).then(|| api_url.to_owned()),
+            // 原样写回配置文件里原本的值：环境变量与内置默认地址都不固化，
+            // 这样以后换默认地址，老用户不改文件也能跟上
+            api_url: self.api_url_from_config.clone(),
         };
         if let Err(err) = self.store.save_config(&config) {
             self.toast_error(format!("配置保存失败：{err:#}"));

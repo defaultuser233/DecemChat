@@ -759,3 +759,31 @@ fn pressing_the_mask_does_not_make_the_panel_unclickable() {
         "抽屉被遮罩盖住后点不动了：{actions:?}"
     );
 }
+
+/// 保存配置时不该把解析出来的默认接口地址固化进配置文件。
+///
+/// 否则以后换默认地址，老用户的 `config.json` 会一直压着新值：
+/// 换个内置地址就等于要所有用户手工改文件，等于换不动。
+#[test]
+fn saving_config_does_not_pin_the_default_api_url() {
+    let store = temp_store("flow-config");
+    store
+        .save_config(&StoredConfig::new(default_settings()))
+        .expect("写入测试配置失败");
+
+    let ctx = egui::Context::default();
+    let mut app =
+        DecemApp::build(store.clone(), &ctx, LoadedFonts::default(), None).expect("构造应用失败");
+
+    // 切换明暗主题会走 `persist_config`，等于在真实通路上落盘一次
+    let was_dark = app.settings.is_dark_mode;
+    app.apply(Action::SetDarkMode(!was_dark));
+
+    let saved = store.load_config().expect("读回配置失败");
+    assert_eq!(saved.settings.is_dark_mode, !was_dark, "配置应当真的落盘了");
+    assert!(
+        saved.api_url.is_none(),
+        "配置文件里没有 apiUrl 时不该被写进默认值：{:?}",
+        saved.api_url
+    );
+}
