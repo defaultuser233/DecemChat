@@ -47,9 +47,9 @@ fn main() {
     // LNK4003（无效库格式，已忽略）+ LNK1120，decem-core 的 doctest 链接失败。
     // 它本身不提供任何符号，删掉不影响外壳自己的链接。
     let shadow = out_dir.join("msvcrt.lib");
-    if shadow.is_file() {
-        if let Err(err) = fs::remove_file(&shadow) {
-            println!("cargo:warning=无法移除 tauri-build 的占位 msvcrt.lib：{err}");
-        }
+    if shadow.is_file()
+        && let Err(err) = fs::remove_file(&shadow)
+    {
+        println!("cargo:warning=无法移除 tauri-build 的占位 msvcrt.lib：{err}");
     }
 }
