@@ -174,6 +174,189 @@ cargo run -p decem-app -- --selftest --live   # 默认走服务端代理，无�
 
 部署后，前端对 `/api/chat` 的请求会由 Edge Function 转发到 DashScope。
 
+## 🖥️ 自建服务端部署
+
+Netlify 之外的另一种跑法：把 `server/index.ts`（Express，同时托管 `dist/` 与 `/api/chat`）
+放在自己的 VPS 上。桌面版的默认接口地址指的就是这里。
+
+```
+桌面版 / 浏览器
+      │  https://api.valedecem.top:8443      ← TLS 在这里终结（Let's Encrypt）
+      ▼
+   nginx 8443 ──► 127.0.0.1:3000             ← Express 只听本机，不对公网开放
+                       │
+                       ▼  带着服务器上的 Key 转发
+                  DashScope
+```
+
+### 为什么是 8443
+
+域名指向境内服务器、走 80/443 需要 ICP 备案；不备案就只能用**非标准端口**。
+8443 是 HTTPS 的惯例替代端口，而且它也在 Cloudflare 可代理的端口列表里
+（443 / 2053 / 2083 / 2087 / 2096 / 8443）——以后想套 CDN 藏源站，不用换端口。
+
+### 一次性准备（VPS 上）
+
+```bash
+sudo apt update && sudo apt install -y nginx
+# 证书目录：ubuntu 用户可写，nginx（主进程以 root 跑）能读到私钥
+sudo install -d -o ubuntu -g ubuntu -m 0755 /etc/ssl/decem
+```
+
+证书走 **DNS 验证**（80 端口上未备案的域名在境内会被拦，HTTP-01 大概率失败）：
+
+```bash
+curl https://get.acme.sh | sh -s email=你的邮箱
+export CF_Token="Cloudflare API Token（权限：Zone → DNS → Edit）"
+
+~/.acme.sh/acme.sh --issue --dns dns_cf -d api.valedecem.top --server letsencrypt
+~/.acme.sh/acme.sh --install-cert -d api.valedecem.top --ecc \
+  --key-file       /etc/ssl/decem/api.key \
+  --fullchain-file /etc/ssl/decem/api.crt \
+  --reloadcmd      "sudo systemctl reload nginx"
+```
+
+> **三个踩过的坑**
+>
+> 1. `--issue` 和 `--install-cert` **不能写在同一条命令里**：acme.sh 一次只做一个动作，
+>    合在一起时只有 `--install-cert` 生效，报 `The domain ... is not a cert name`。
+> 2. 安装那步必须带 `--ecc`：acme.sh 默认签 ECC 证书，目录名是 `api.valedecem.top_ecc`；
+>    漏掉它会去找 RSA 目录，报同一个错。
+> 3. 别用 `sudo` 跑 acme.sh 本体：它的工作目录会变成 `/root/.acme.sh`，和安装时落在
+>    普通用户下的续期任务对不上，**证书到期就不会自动续了**。只有 `--reloadcmd` 那步需要 sudo。
+>    续期凭据存在 `~/.acme.sh/account.conf` 里，别删这个目录。
+
+### nginx：8443 反代到 3000
+
+`/etc/nginx/conf.d/decem-api.conf`：
+
+```nginx
+server {
+    listen 8443 ssl;
+    server_name api.valedecem.top;
+
+    ssl_certificate     /etc/ssl/decem/api.crt;
+    ssl_certificate_key /etc/ssl/decem/api.key;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection        "";
+
+        proxy_buffering off;   # SSE 流式必须关，否则回复会攒着一口气吐出来
+        proxy_cache off;
+        proxy_read_timeout 3600s;
+    }
+}
+```
+
+```bash
+sudo nginx -t && sudo systemctl reload nginx
+curl -sS https://api.valedecem.top:8443/health     # 期望：OK
+```
+
+### 让 Node 服务一直活着
+
+`server/index.ts` 一旦不在，8443 就是一个 502。下面二选一。
+
+**A. systemd（开机自启 + 崩溃自动重启，推荐）**
+
+`/etc/systemd/system/decemchat.service`：
+
+```ini
+[Unit]
+Description=DecemChat server (Express + /api/chat 代理)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/DecemChat
+# 前面加 '-'：.env 不存在时也不报错（Key 也可能来自别处）
+EnvironmentFile=-/home/ubuntu/DecemChat/.env
+# 直接用绝对路径的 node 跑 tsx，不经过 pnpm / corepack（systemd 的 PATH 很干净）
+ExecStart=/home/ubuntu/.nvm/versions/node/v24.21.0/bin/node /home/ubuntu/DecemChat/node_modules/tsx/dist/cli.mjs server/index.ts
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now decemchat
+systemctl status decemchat --no-pager
+sudo journalctl -u decemchat -n 20 --no-pager     # 期望看到 API key configured: true
+```
+
+> `ExecStart` 里是 nvm 下 Node 的绝对路径——**以后 `nvm install` 换了版本，这行要跟着改，
+> 再 `daemon-reload`**，否则服务起不来。
+
+**B. tmux（轻量、临时）**
+
+`~/decemchat-run.sh`：
+
+```bash
+#!/bin/bash
+cd /home/ubuntu/DecemChat
+NODE=/home/ubuntu/.nvm/versions/node/v24.21.0/bin/node
+while true; do
+  "$NODE" node_modules/tsx/dist/cli.mjs server/index.ts >> /home/ubuntu/decemchat-server.log 2>&1
+  echo "[$(date)] 进程退出，3 秒后重启" >> /home/ubuntu/decemchat-server.log
+  sleep 3
+done
+```
+
+```bash
+chmod +x ~/decemchat-run.sh
+tmux new -d -s decemchat ~/decemchat-run.sh    # 起
+tmux ls                                        # 看
+tmux attach -t decemchat                       # 进去看日志：Ctrl+B 松手再按 D 脱离
+
+# 想让机器重启后也自己回来，补一条 @reboot（别重复执行，会加两条）
+( crontab -l 2>/dev/null; echo '@reboot /usr/bin/tmux new -d -s decemchat /home/ubuntu/decemchat-run.sh' ) | crontab -
+```
+
+> tmux 自己**不管机器重启**（靠上面那条 `@reboot`），也**不会在进程崩溃时重启**（靠脚本里的 `while`）。
+> 从 tmux 换到 systemd 时，先 `tmux kill-session -t decemchat`，别让两个进程抢 3000。
+
+### 防火墙有两层，别只改一层
+
+| 层 | 在哪 | 特征 |
+| --- | --- | --- |
+| 安全组 | 云厂商控制台 | 云平台的虚拟防火墙，丢弃是**静默**的（表现为超时） |
+| ufw | 机器上 | 操作系统防火墙 |
+
+对外只开 **8443**（另外留 22 给 SSH）。3000 从两层里都去掉之后，外网就扫不到它；
+而 nginx → `127.0.0.1:3000` 走的是**回环接口**，ufw 默认规则放行 `lo`，
+**所以关掉对外 3000 不影响反代**——这点实测过，不需要再给 3000 额外开本机白名单。
+
+判断"包到底卡在哪一层"：
+
+```bash
+curl -v --max-time 10 http://api.valedecem.top:3000/health
+# Connection refused  → 包到了机器，机器上没有程序在听（或被本机防火墙主动拒绝）
+# Connection timed out → 被安全组 / 防火墙静默丢弃
+```
+
+### 排障速查
+
+| 现象 | 含义 / 先看什么 |
+| --- | --- |
+| `https://…:8443/health` 返回网页 HTML | 跑的是**旧版** Node 代码（`/health` 路由是后加的），重新部署一次 |
+| 8443 返回 502 | Node 服务没在 3000 上：`systemctl status decemchat` / `tmux ls` |
+| 桌面版报证书错误 | 证书必须是公信 CA 签的。桌面版用 rustls + 内置根库（`webpki-roots`），**自签证书和 Cloudflare Origin Certificate 都不被信任** |
+| 流式回复"憋一大段才出来" | nginx 少了 `proxy_buffering off;` |
+| 证书快到期了 | `~/.acme.sh/acme.sh --list`；续期后 `--reloadcmd` 会自动 reload nginx |
+| 换了域名或端口 | 改 `crates/decem-app/src/app.rs` 的 `DEFAULT_API_URL` 重新构建；用户配置里显式写过 `apiUrl` 的那份优先 |
+
 ## 🔐 安全说明
 
 - **不要**将 API Key 写入前端环境变量 `VITE_...`
@@ -218,6 +401,14 @@ cargo run -p decem-app -- --selftest --live   # 默认走服务端代理，无�
 ```bash
 pnpm install
 ```
+
+> **别用 `corepack use pnpm@latest` 去换版本。** 包管理器版本锁在 `package.json` 的
+> `packageManager` 字段里（`pnpm@11.6.0+sha512...`），而且 pnpm 自己（9.7 起）和 corepack
+> **都会读这个字段并自动切换到声明的版本**。换成 12.x 之后，`pnpm-lock.yaml` 会被判为过期，
+> `--frozen-lockfile` 直接报 `ERR_PNPM_FROZEN_LOCKFILE_WITH_OUTDATED_LOCKFILE`——
+> Dockerfile 和 Netlify 的构建都挂在这一步。真要升，必须同时重建锁文件
+> （pnpm 12 会往锁文件顶部多写一段"包管理器自身依赖"，实测 158 行、不改任何依赖版本），
+> 并把 `package.json` 与 `pnpm-lock.yaml` **一起**提交。
 
 ### 2. 配置环境变量
 
