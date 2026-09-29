@@ -132,3 +132,77 @@ jobs:
           name: decem-app-${{ matrix.target }}
           path: artifacts/*
           if-no-files-found: error
+
+  # Android 出包放在 Linux runner 上：那边创建符号链接没有 Windows 那种限制，
+  # 也不依赖本机装了 Android Studio。产物是 debug 签名的 APK，可直接侧载。
+  android:
+    name: 构建 Android APK（debug）
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      # Tauri 的 Android 模板写死了 NDK 29.0.13846066 与 compileSdk 37
+      - name: 安装 NDK r29
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r29
+          local-cache: true
+
+      # 解压出来的符号链接在某些镜像上会让 clang 找不到自己：把链接展开成实体文件
+      - name: 展开 NDK 里的符号链接
+        run: |
+          set -euo pipefail
+          bin="${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          if [ -d "$bin" ]; then
+            for f in "$bin"/*; do
+              if [ -L "$f" ]; then
+                target=$(readlink -f "$f")
+                rm -f "$f"
+                cp "$target" "$f"
+              fi
+            done
+          fi
+
+      - name: 安装 Rust 工具链与 Android 目标
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android-aarch64
+
+      # 版本取自 package.json 的 packageManager，不另写死
+      - uses: pnpm/action-setup@v6
+
+      - name: 构建前端
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: 构建 debug APK
+        env:
+          NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: npx --yes @tauri-apps/cli@2.12.0 android build --debug --target aarch64
+
+      - name: 收集产物
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          find src-tauri/gen/android/app/build/outputs/apk -name "*.apk" -exec cp {} artifacts/ \;
+          ls -l artifacts
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: decem-chat-android-debug
+          path: artifacts/*
+          if-no-files-found: error
