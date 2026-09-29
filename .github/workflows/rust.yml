@@ -192,7 +192,24 @@ jobs:
       - name: 构建 debug APK
         env:
           NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
-        run: npx --yes @tauri-apps/cli@2.12.0 android build --debug --target aarch64
+        run: |
+          set -uo pipefail
+          echo "--- 环境速览 ---"
+          java -version 2>&1 | head -2 || true
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          echo "SDK=$SDK"
+          echo "NDK_HOME=$NDK_HOME"
+          ls "$SDK/ndk" 2>/dev/null || true
+          ls "$SDK/platforms" 2>/dev/null || true
+          ls "$SDK/build-tools" 2>/dev/null || true
+          echo "--- 开始构建 ---"
+          npx --yes @tauri-apps/cli@2.12.0 android build --debug --target aarch64 -vv 2>&1 | tee build.log
+          code=${PIPESTATUS[0]}
+          if [ "$code" -ne 0 ]; then
+            # 本仓库的日志无法匿名下载，于是把尾部塞进 annotation——annotations API 是公开可读的
+            echo "::error::构建失败（退出码 $code），日志尾部：$(tail -c 6000 build.log | tr '\n' '|')"
+            exit "$code"
+          fi
 
       - name: 收集产物
         run: |
