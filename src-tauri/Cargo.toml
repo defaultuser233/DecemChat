@@ -1,0 +1,31 @@
+[package]
+name = "decem-shell"
+description = "Decem Chat 的 Tauri 外壳：本地服务提供前端产物，并把 /api/chat 转发给上游"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "decem_shell_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "decem-shell"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = "2.7.0"
+
+[dependencies]
+anyhow.workspace = true
+axum = "0.8.9"
+decem-core = { path = "../crates/decem-core" }
+futures-util.workspace = true
+include_dir = "0.7.4"
+mime_guess = "2.0.5"
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tauri = "2.12.0"
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }

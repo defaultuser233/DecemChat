@@ -1,0 +1,16 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Decem Chat",
+  "version": "2.42.0",
+  "identifier": "top.valedecem.DecemChat",
+  "build": {
+    "frontendDist": "../dist",
+    "beforeBuildCommand": "pnpm build"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": null
+    }
+  }
+}

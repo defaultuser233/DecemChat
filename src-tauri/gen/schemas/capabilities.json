@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"外壳窗口的默认能力。前端不走 IPC（它只请求本地服务），这里只是留一个正常的能力声明。","local":true,"windows":["main"],"permissions":["core:default"]}}
