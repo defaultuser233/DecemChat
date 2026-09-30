@@ -186,6 +186,7 @@ jobs:
       - name: 构建 debug APK
         run: |
           set -uo pipefail
+          echo "::warning::step-build-apk-started"
           echo "--- 环境速览 ---"
           java -version 2>&1 | head -2 || true
           echo "SDK=${ANDROID_HOME:-未设置}  NDK_HOME=${NDK_HOME:-未设置}"
@@ -195,9 +196,9 @@ jobs:
           code=${PIPESTATUS[0]}
           if [ "$code" -ne 0 ]; then
             # 日志无法匿名下载，于是把尾部塞进 annotation（annotations API 公开可读）。
-            # 注意：过长或含控制字符的 annotation 会被 GitHub 丢弃，这里只取最后 10 行并清洗。
-            tail -n 10 build.log | tr -d '\r' | sed 's/[^ -~]//g' | tr '\n' '|' > build-tail.txt
-            echo "::error::构建失败(退出码 $code)；尾部：$(tail -c 1200 build-tail.txt)"
+            # 注意：消息里不能有 % 或换行，也不能太长，否则会被 GitHub 丢弃。
+            MSG=$(tail -n 8 build.log | tr -d '\r%' | sed 's/[^ -~]//g' | tr '\n' ' ' | cut -c1-300)
+            echo "::error title=构建失败 code=$code::${MSG}"
             exit "$code"
           fi
 
