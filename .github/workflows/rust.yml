@@ -149,13 +149,22 @@ jobs:
           distribution: temurin
           java-version: 21
 
-      # Tauri 的 Android 模板写死了 NDK 29.0.13846066 与 compileSdk 37
-      - name: 安装 NDK r29
-        id: ndk
-        uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: r29
-          local-cache: true
+      # Tauri 的 Android 模板写死了 NDK 29.0.13846066 与 compileSdk 37.0。
+      # 用 sdkmanager 装精确版本：r29 只是别名，装出来是另一个 patch 版本，
+      # Tauri 的 CLI 按写死版本号去找，找不到会直接失败。
+      - name: 安装 Android SDK 组件与 NDK（精确版本）
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          SM="$(ls -d "$SDK"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -1)"
+          if [ -z "$SM" ]; then echo "找不到 sdkmanager（$SDK）"; ls "$SDK"; exit 1; fi
+          echo "sdkmanager=$SM"
+          yes | "$SM" --licenses > /dev/null 2>&1 || true
+          "$SM" --install "platform-tools" "platforms;android-37.0" "build-tools;37.0.0" "ndk;29.0.13846066"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          echo "NDK_HOME=$SDK/ndk/29.0.13846066" >> "$GITHUB_ENV"
+          ls "$SDK/ndk" "$SDK/platforms" "$SDK/build-tools"
 
       - name: 安装 Rust 工具链与 Android 目标
         uses: dtolnay/rust-toolchain@stable
@@ -175,24 +184,20 @@ jobs:
           pnpm build
 
       - name: 构建 debug APK
-        env:
-          NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
         run: |
           set -uo pipefail
           echo "--- 环境速览 ---"
           java -version 2>&1 | head -2 || true
-          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
-          echo "SDK=$SDK"
-          echo "NDK_HOME=$NDK_HOME"
-          ls "$SDK/ndk" 2>/dev/null || true
-          ls "$SDK/platforms" 2>/dev/null || true
-          ls "$SDK/build-tools" 2>/dev/null || true
+          echo "SDK=${ANDROID_HOME:-未设置}  NDK_HOME=${NDK_HOME:-未设置}"
+          ls "${ANDROID_HOME:-/usr/local/lib/android/sdk}/ndk" 2>/dev/null || true
           echo "--- 开始构建 ---"
           npx --yes @tauri-apps/cli@2.12.0 android build --debug --target aarch64 -vv 2>&1 | tee build.log
           code=${PIPESTATUS[0]}
           if [ "$code" -ne 0 ]; then
-            # 本仓库的日志无法匿名下载，于是把尾部塞进 annotation——annotations API 是公开可读的
-            echo "::error::构建失败（退出码 $code），日志尾部：$(tail -c 6000 build.log | tr '\n' '|')"
+            # 日志无法匿名下载，于是把尾部塞进 annotation（annotations API 公开可读）。
+            # 注意：过长或含控制字符的 annotation 会被 GitHub 丢弃，这里只取最后 10 行并清洗。
+            tail -n 10 build.log | tr -d '\r' | sed 's/[^ -~]//g' | tr '\n' '|' > build-tail.txt
+            echo "::error::构建失败(退出码 $code)；尾部：$(tail -c 1200 build-tail.txt)"
             exit "$code"
           fi
 
