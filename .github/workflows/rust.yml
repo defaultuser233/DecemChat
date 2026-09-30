@@ -157,21 +157,6 @@ jobs:
           ndk-version: r29
           local-cache: true
 
-      # 解压出来的符号链接在某些镜像上会让 clang 找不到自己：把链接展开成实体文件
-      - name: 展开 NDK 里的符号链接
-        run: |
-          set -euo pipefail
-          bin="${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          if [ -d "$bin" ]; then
-            for f in "$bin"/*; do
-              if [ -L "$f" ]; then
-                target=$(readlink -f "$f")
-                rm -f "$f"
-                cp "$target" "$f"
-              fi
-            done
-          fi
-
       - name: 安装 Rust 工具链与 Android 目标
         uses: dtolnay/rust-toolchain@stable
         with:
