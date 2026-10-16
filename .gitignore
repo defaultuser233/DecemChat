@@ -10,3 +10,7 @@ node_modules/
 
 # Rust
 /target/
+
+# Android 构建产物：体积很大（debug APK 约 175MB），不要提交
+*.apk
+*.aab
