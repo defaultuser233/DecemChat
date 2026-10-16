@@ -114,6 +114,29 @@ const API_URL: &str = "https://api.valedecem.top:8443/api/chat";
 /// 默认模型。模型表与能力查询都在 `decem_core::models` 里，阶段 3 再做切换面板。
 const MODEL: &str = DEFAULT_MODEL;
 
+/// 把消息历史拼成上游请求体。`send` 与 `regenerate` 共用，
+/// 保证「重发同一条用户消息」与「发新消息」走完全相同的编排。
+///
+/// system 提示词 + 最近 10 条由 `ChatRequest::new` 负责编排；
+/// 图片在 `format_messages` 里按模型是否支持视觉决定拼成多模态数组还是降级成文字。
+fn build_request_body(messages: &[Msg]) -> Result<Vec<u8>, String> {
+    let history: Vec<Message> = messages
+        .iter()
+        .enumerate()
+        .map(|(index, msg)| {
+            let role = match msg.role {
+                Role::User => MessageRole::User,
+                Role::Char => MessageRole::Assistant,
+            };
+            let mut message = Message::text(index.to_string(), role, msg.text.as_str(), 0);
+            message.image_url = msg.image.as_ref().map(|image| image.data_url.clone());
+            message
+        })
+        .collect();
+    let request = ChatRequest::new(MODEL, &history);
+    serde_json::to_vec(&request.to_upstream()).map_err(|err| format!("请求体序列化失败：{err}"))
+}
+
 // ---------------------------------------------------------------- 真实上游
 
 enum WorkerEvent {
@@ -437,6 +460,16 @@ impl Widget for ChatList {
                             Role::Char => id!(Char),
                         };
                         let (item_widget, existed) = list.item_with_existed(cx, item_id, template);
+                        // 「重新生成」只挂在最后一条 char 消息上，流式时全部隐藏
+                        // （与网页版同一个条件：最后一条 assistant 且非流式）。
+                        // User 模板里没有这个按钮，对它调用只会拿到空引用，
+                        // set_visible 是空操作；set_visible 只在值变化时 redraw。
+                        let show_regen = !chat.is_streaming
+                            && item_id + 1 == chat.messages.len()
+                            && msg.role == Role::Char;
+                        item_widget
+                            .glass_button(cx, ids!(regen_button))
+                            .set_visible(cx, show_regen);
                         let mut markdown = item_widget.markdown(cx, ids!(selectable));
                         markdown.set_text(cx, &msg.text);
                         if was_animating {
@@ -600,25 +633,7 @@ impl App {
             chat.streaming.clear();
             chat.is_streaming = true;
 
-            // system 提示词 + 最近 10 条由 `ChatRequest::new` 负责编排；
-            // 图片在 `format_messages` 里按模型是否支持视觉决定拼成多模态数组还是降级成文字
-            let history: Vec<Message> = chat
-                .messages
-                .iter()
-                .enumerate()
-                .map(|(index, msg)| {
-                    let role = match msg.role {
-                        Role::User => MessageRole::User,
-                        Role::Char => MessageRole::Assistant,
-                    };
-                    let mut message = Message::text(index.to_string(), role, msg.text.as_str(), 0);
-                    message.image_url = msg.image.as_ref().map(|image| image.data_url.clone());
-                    message
-                })
-                .collect();
-            let request = ChatRequest::new(MODEL, &history);
-            let payload = serde_json::to_vec(&request.to_upstream())
-                .map_err(|err| format!("请求体序列化失败：{err}"));
+            let payload = build_request_body(&chat.messages);
             (payload, chat.messages.len() + 1)
         };
 
@@ -633,13 +648,7 @@ impl App {
             }
         }
 
-        let list = self
-            .ui
-            .widget(cx, ids!(chat_list))
-            .portal_list(cx, ids!(list));
-        list.set_tail_range(true);
-        list.set_first_id_and_scroll(items_len.saturating_sub(1), 0.0);
-        cx.redraw_all();
+        self.scroll_to_tail(cx, items_len);
     }
 
     /// Esc 中断：把已经流出来的部分定格成一条消息。
@@ -649,6 +658,74 @@ impl App {
         }
         self.finish_stream();
         self.worker = None;
+        cx.redraw_all();
+    }
+
+    /// 重新生成最后一段问答：丢掉最后一条 char 回复，用同一条用户消息再请求一次。
+    /// 流式中不生效（`worker` 还在）——网页版只靠隐藏按钮防并发，这里照 egui 版加守门。
+    fn regenerate(&mut self, cx: &mut Cx) {
+        if self.worker.is_some() {
+            return;
+        }
+        // 截断与组请求体在同一把锁里做完，避免中途被 UI 线程插队
+        let (payload, items_len) = {
+            let mut chat = CHAT.write().unwrap();
+            let Some(last_user) = chat.messages.iter().rposition(|msg| msg.role == Role::User)
+            else {
+                // 没有用户消息（空记录 / 只有欢迎语）：什么都不做
+                return;
+            };
+            // 丢掉该用户消息之后的 char 回复。egui 版同法；网页版只删最后一条，
+            // 但失败提示也是 char 消息，删到最后一条用户消息为止更稳
+            chat.messages.truncate(last_user + 1);
+            chat.streaming.clear();
+            chat.is_streaming = true;
+            let payload = build_request_body(&chat.messages);
+            (payload, chat.messages.len() + 1)
+        };
+
+        match payload {
+            Ok(body) => self.worker = Some(Worker::spawn_chat(body)),
+            Err(reason) => {
+                push_message(format!("⚠️ {reason}"));
+                self.worker = None;
+            }
+        }
+
+        self.scroll_to_tail(cx, items_len);
+    }
+
+    /// 清空聊天记录（已经过二次确认）：打断流式、清掉所有消息，只留一条欢迎语。
+    /// 照 egui 版 `clear_chat()` 先打断 worker——网页版不打断，
+    /// 进行中的请求完成时会把消息「复活」回刚清空的列表。
+    /// （本版没有持久化与 IndexedDB 图片库，网页版那两步在这里没有对应物。）
+    fn clear_chat(&mut self, cx: &mut Cx) {
+        if let Some(worker) = &self.worker {
+            worker.cancel();
+        }
+        self.worker = None;
+        {
+            let mut chat = CHAT.write().unwrap();
+            chat.streaming.clear();
+            chat.is_streaming = false;
+            chat.messages.clear();
+            chat.messages.push(Msg {
+                role: Role::Char,
+                text: WELCOME.to_owned(),
+                image: None,
+            });
+        }
+        self.scroll_to_tail(cx, 1);
+    }
+
+    /// 把列表滚到指定项（新消息或正在流式的那一项）。send / regenerate / clear 共用。
+    fn scroll_to_tail(&self, cx: &mut Cx, items_len: usize) {
+        let list = self
+            .ui
+            .widget(cx, ids!(chat_list))
+            .portal_list(cx, ids!(list));
+        list.set_tail_range(true);
+        list.set_first_id_and_scroll(items_len.saturating_sub(1), 0.0);
         cx.redraw_all();
     }
 
@@ -708,6 +785,43 @@ impl MatchEvent for App {
         }
         if self.ui.glass_button(cx, ids!(send_button)).clicked(actions) {
             self.send(cx);
+        }
+        // 清空聊天记录：先弹二次确认。Modal 的 can_dismiss 默认 true，
+        // 点遮罩或 Esc 即取消，Modal 自己关，不用接 dismissed。
+        if self
+            .ui
+            .glass_button(cx, ids!(clear_button))
+            .clicked(actions)
+        {
+            self.ui.modal(cx, ids!(clear_confirm)).open(cx);
+        }
+        if self
+            .ui
+            .glass_button(cx, ids!(confirm_clear_button))
+            .clicked(actions)
+        {
+            self.ui.modal(cx, ids!(clear_confirm)).close(cx);
+            self.clear_chat(cx);
+        }
+        if self
+            .ui
+            .glass_button(cx, ids!(cancel_clear_button))
+            .clicked(actions)
+        {
+            self.ui.modal(cx, ids!(clear_confirm)).close(cx);
+        }
+        // 最后一条 char 气泡底部的「重新生成」。逐项动作照 aichat 示例的
+        // 逐项删除：动作带着所在 item 的 uid，这里按 item 找回按钮。
+        // regenerate 内部还有流式守门与最后一条用户消息的重查，
+        // 就算按错了 item 也不会出事。
+        let list = self
+            .ui
+            .widget(cx, ids!(chat_list))
+            .portal_list(cx, ids!(list));
+        for (_, item) in list.items_with_actions(actions) {
+            if item.glass_button(cx, ids!(regen_button)).clicked(actions) {
+                self.regenerate(cx);
+            }
         }
         if self
             .ui
@@ -831,6 +945,18 @@ script_mod! {
                         }
                     }
                 }
+
+                // 「重新生成」：与网页版同位置——最后一条 char 气泡底部的文字按钮。
+                // 只在最后一条 char 消息上可见（流式时隐藏），
+                // 显隐由 ChatList::draw_walk 按项控制。
+                regen_button := glass.GlassButton {
+                    text: "重新生成"
+                    width: Fit
+                    height: 30
+                    padding: Inset{left: 12 right: 12 top: 0 bottom: 0}
+                    // 淡橙：与用户气泡的橙（#E95620）同族，提示这是对最后一段问答的操作
+                    draw_glass +: { tint: vec4(0.91, 0.34, 0.13, 0.18) }
+                }
             }
 
             // 用户一侧：右对齐、橙色气泡（与网页版同一个橙 #E95620）
@@ -850,13 +976,15 @@ script_mod! {
                         draw_bg.border_radius: uniform(16.)
                         padding: Inset{left: 14 top: 10 right: 14 bottom: 10}
 
-                        // 用户发的图。居中显示，没有纹理时高度收成 0、不占位
+                        // 用户发的图。没有纹理时高度收成 0、不占位。
+                        // 宽度必须是 Fill：`Image` 在 Fit 宽度下会占住位置却不画纹理。
+                        // 另外 `Image` **没有 align 属性**，写了会在运行时脚本报错（编译期不报），
+                        // 所以图是左对齐的，特别竖长的图右侧会留白。
                         photo := Image {
-                            width: Fit
+                            width: Fill
                             height: Fit
                             max_height: FitBound.Abs(320)
                             fit: ImageFit.Smallest
-                            align: Align{x: 0.5}
                         }
 
                         selectable := Markdown {
@@ -902,6 +1030,14 @@ script_mod! {
                             spacing: 8.
                             align: Align{y: 1.0}
 
+                            // 清空放在最左：离「发送」最远，降低误触概率。
+                            // 二次确认弹层见下面 body 末尾的 clear_confirm。
+                            clear_button := glass.GlassButton {
+                                text: "清空"
+                                width: 64
+                                height: 44
+                            }
+
                             attach_button := glass.GlassButtonProminent {
                                 text: "＋图"
                                 width: 72
@@ -918,6 +1054,70 @@ script_mod! {
                                 text: "发送"
                                 width: 84
                                 height: 44
+                            }
+                        }
+
+                        // 「清空聊天记录」二次确认。Modal 是 overlay——
+                        // on_after_apply 把向上报的 Walk 钉成 empty，
+                        // 不占布局坑位，放 body 里当兄弟节点即可。
+                        // can_dismiss 默认 true：点遮罩或 Esc 即取消，Modal 自己关。
+                        clear_confirm := Modal {
+                            content +: {
+                                // 固定宽卡片 + Fill 子项：与 makepad 自带的
+                                // Dialog（dialog.rs）和 modal_footprint 示例
+                                // 同一个模式。宽度照 Dialog 的 420 收一档。
+                                card := View {
+                                    width: 360
+                                    height: Fit
+                                    flow: Down
+                                    spacing: 10.
+                                    padding: Inset{left: 20 top: 16 right: 20 bottom: 16}
+                                    show_bg: true
+                                    draw_bg.color: #x2b2b35
+                                    draw_bg.border_radius: uniform(16.)
+
+                                    title := Label {
+                                        width: Fill
+                                        height: Fit
+                                        text: "确认清空聊天记录？"
+                                        draw_text +: {
+                                            color: #xffffffff
+                                            text_style: theme.font_bold{font_size: 15}
+                                        }
+                                    }
+
+                                    desc := Label {
+                                        width: Fill
+                                        height: Fit
+                                        text: "此操作将永久删除所有聊天记录，此操作不可撤销。"
+                                        draw_text +: {
+                                            color: #x9a9aa5
+                                            text_style: theme.font_regular{font_size: 12}
+                                        }
+                                    }
+
+                                    row := View {
+                                        width: Fill
+                                        height: Fit
+                                        flow: Right
+                                        spacing: 8.
+                                        align: Align{x: 1.0}
+
+                                        cancel_clear_button := glass.GlassButton {
+                                            text: "取消"
+                                            width: 72
+                                            height: 36
+                                        }
+
+                                        confirm_clear_button := glass.GlassButtonProminent {
+                                            text: "确认清空"
+                                            width: 96
+                                            height: 36
+                                            // 警示红：GlassButton 没有 destructive 变体，靠 tint 自己调
+                                            draw_glass +: { tint: vec4(0.85, 0.24, 0.20, 0.40) }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
