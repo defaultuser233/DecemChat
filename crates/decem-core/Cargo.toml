@@ -4,14 +4,23 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bytes = "1.12.1"
-futures-util.workspace = true
-reqwest.workspace = true
+bytes = { version = "1.12.1", optional = true }
+futures-util = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"], optional = true }
 tracing.workspace = true
+
+[features]
+# 默认带上 reqwest 那套流式客户端（egui 版 / Tauri 版用它）。
+# `default-features = false` 时只剩纯逻辑：models / message / prompt / sse，
+# 第三方依赖只有 serde + serde_json + thiserror。
+# Makepad 版就走后者 —— 它用 makepad-platform 自带的阻塞 HTTP，
+# 不该为一个用不上的 reqwest 在 Android/iOS 交叉编译时多背一层 rustls。
+default = ["http"]
+http = ["dep:bytes", "dep:futures-util", "dep:reqwest", "dep:tokio"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

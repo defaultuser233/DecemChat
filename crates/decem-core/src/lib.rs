@@ -8,11 +8,18 @@
 //! - [`prompt`]：Decem 的人格提示词
 //! - [`sse`]：DashScope 兼容模式 SSE 流的增量解析
 //! - [`provider`]：基于 `reqwest` 的流式聊天客户端（rustls，无 OpenSSL 依赖）
+//!
+//! # feature
+//!
+//! `http`（默认开启）提供 [`provider`] 与 [`Error::Transport`]。
+//! 关掉它（`default-features = false`）就只剩纯逻辑，第三方依赖只有 serde 三件套 ——
+//! 给自带 HTTP 客户端、且要交叉编译到移动端的使用者（如 `decem-makepad`）用。
 
 pub mod error;
 pub mod message;
 pub mod models;
 pub mod prompt;
+#[cfg(feature = "http")]
 pub mod provider;
 pub mod sse;
 
@@ -27,5 +34,6 @@ pub use models::{
     random_user_avatar, supports_temperature,
 };
 pub use prompt::SYSTEM_PROMPT;
+#[cfg(feature = "http")]
 pub use provider::{API_URL, ChatStream, Client, api_key_from_env};
 pub use sse::{SseDecoder, SseOutcome, parse_sse_line};

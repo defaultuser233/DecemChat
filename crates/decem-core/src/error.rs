@@ -10,6 +10,8 @@ pub enum Error {
     MissingApiKey,
 
     /// 与 AI 服务商的网络层交互失败（DNS、TLS、连接中断等）。
+    /// 只有开了 `http` feature（用 reqwest 那套客户端）时才存在。
+    #[cfg(feature = "http")]
     #[error("无法连接 AI 服务商：{0}")]
     Transport(#[from] reqwest::Error),
 

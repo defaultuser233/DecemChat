@@ -6,8 +6,11 @@
 ## 0. 一句话状态
 
 方向已定：**用 Makepad（纯 Rust 自绘）重做 Decem Chat**，分四阶段、每阶段有验收门槛。
-当前进度：**阶段 1 已通过验收**（`decem-makepad/`）。骨架能跑、中文输入法能上屏、流式打字机与
-300 条长列表滚动都实测过了，证据见 §3。**下一道门是阶段 2：接真实网络（HTTPS + SSE）。**
+当前进度：**阶段 1（骨架）与阶段 2（真实网络）都已完成并实测通过**（`decem-makepad/`）。
+骨架能跑、中文输入法能上屏、流式打字机正常、300 条长列表滚动跟手；
+现在发出去的是真请求，`decem-core` 的 SSE 解析器接 `blocking_http` 的阻塞流，
+Esc 能中断真实流。证据见 §3 与 §9。
+**下一道门是阶段 3：功能对齐长尾**（图片消息、重新生成、清空、模型切换、设置、持久化……）。
 现有实现（网页版 / Tauri 版 / egui 版）**全部保留、一行未动**，继续是主力。
 
 历史坑（都结清了，别再重踩）：
@@ -32,16 +35,16 @@
 
 ## 2. 分阶段计划
 
-### 阶段 1：聊天骨架（进行中）
+### 阶段 1：聊天骨架（✅ 已通过验收，记录见 §3）
 - **目标**：消息列表 + 输入 + 发送 + 流式打字机，数据来自**进程内模拟上游**（先不接网络）
 - **为什么先不接网络**：这一步证伪的是 Makepad 本身；网络是下一道独立的门，混在一起失败时无法归因
 - **验收（要人亲自跑）**：① 中文输入法能敲字 ② 回车/点按钮发送 ③ 回复逐字出现 ④ 长文本换行、列表滚动 ⑤ 全角标点与 emoji 正常
 - ⚠️ **第 ① 条不过就停在这里**（中文聊天 App 没法用），届时如实报告而不是硬撑
 
-### 阶段 2：接真实网络（第二道门）
-工作线程里用 `makepad_platform::network::blocking_http`（**要求 HTTPS**，可边收边写给 writer）
-→ 自己解 SSE（`crates/decem-core/src/sse.rs` 有现成解析器与测试）
-→ channel + `SignalToUI` 推给 UI → 交给 Markdown 的流式动画。
+### 阶段 2：接真实网络（✅ 已实现并实测，记录见 §9）
+工作线程里用 `makepad_platform::makepad_network::blocking_http`（**HTTPS、只走一跳**，可边收边写给 writer）
+→ 复用 `decem-core` 的 SSE 解析器与请求编排 → channel + `SignalToUI` 推给 UI → 交给 Markdown 的流式动画。
+
 
 ### 阶段 3：功能对齐（长尾）
 头像与图片消息（base64 解码 + Makepad 的 `Image`）、重新生成、清空记录（二次确认）、
@@ -246,7 +249,7 @@ let body_size = dvec2(laid.size_in_lpxs.width as f64 * scale + TEXT_SLACK, ...);
 | --- | --- |
 | ~~中文输入法（IME）能否在 Makepad 输入框里正常合成~~ → **已验通**（§3） | ✅ 2026-10-16 |
 | 气泡「贴文字」还是「通栏」 | ✅ 已解决（§6.3 的 `Bubble` 自己量宽） |
-| Windows 上原生 TLS 是否撞证书吊销检查（兜底：换 rustls 客户端） | 阶段 2 实测 |
+| Windows 上原生 TLS 是否撞证书吊销检查（兜底：换 rustls 客户端） | ✅ 没撞，不需要兜底（§9） |
 | Makepad 桌面打包工具是否存在/好用 | 阶段 4 核实 |
 | iOS（需 Mac）、macOS/Linux（无机器） | 待条件 |
 | 旧实现处置：Makepad 版可用后，Tauri 版 / egui 版删不删 | 你 |
@@ -258,3 +261,66 @@ let body_size = dvec2(laid.size_in_lpxs.width as f64 * scale + TEXT_SLACK, ...);
 - 网页版 `src/**` 只作对齐依据，**不为 Makepad 版改动它**
 - Makepad 版是独立 crate（自带 `[workspace]`，根 `Cargo.toml` 里已 `exclude`），不拖累现有 CI
 - `AGENTS.md` 只读，不改
+
+## 9. 阶段 2 实现记录（真实网络，2026-10-16）
+
+### 9.1 通路
+
+```
+点击发送 → 组请求体（decem-core::ChatRequest::new：自带 system 提示词 + 最近 10 条）
+        → 工作线程：blocking_http::Request::post(API_URL).json_body(..)
+                      .limits(..).cancel_token(..)
+        → request_to_writer_no_redirect(req, &mut SseSink)
+        → SseSink::write()：decoder.push(buf) → parse_sse_line → channel + SignalToUI
+        → UI 线程 handle_event 里 poll_worker → Markdown 流式动画
+```
+
+代码都在 `decem-makepad/src/main.rs`：`SseSink` / `upstream_error` / `Worker::spawn_chat` / `App::poll_worker`。
+
+**为什么用 `request_to_writer_no_redirect`**：它把解码后的响应体**按到达顺序**边收边写进
+`std::io::Write`，那个 writer 看到的就是网络的真实分包边界；跨包的半个事件、半个多字节字符
+由 `SseDecoder` 兜住（它有单元测试：分包、半个汉字、CRLF、注释行、`[DONE]`）。
+
+接口契约（照服务端 `server/index.ts` 与网页版对齐，别再自己猜）：`POST /api/chat`，
+头只要 `Content-Type: application/json`（**没有鉴权头**，Key 在服务器侧）；
+体 `{ model, messages }`，`messages[i]` 是 `{ role, content }`，角色值 `system`/`user`/`assistant`；
+响应是标准 SSE，`data: {...}`，结束 `data: [DONE]`，增量在 `choices[0].delta.content`。
+`stream` / `max_tokens` / `enable_thinking` 由服务端硬编码，客户端不用发。
+
+### 9.2 `decem-core` 的 feature 改造
+
+Makepad 版不该为一个用不上的 `reqwest` 在 Android/iOS 交叉编译时多背一层 rustls，
+所以给 `decem-core` 加了 feature：
+
+```toml
+[features]
+default = ["http"]
+http = ["dep:bytes", "dep:futures-util", "dep:reqwest", "dep:tokio"]
+```
+
+关掉 `http` 就只剩纯逻辑（`models` / `message` / `prompt` / `sse`），第三方依赖只有 serde 三件套；
+`provider` 模块与 `Error::Transport` 都挂在 `#[cfg(feature = "http")]` 下。
+Makepad 侧用 `default-features = false` 引入。
+
+**默认 feature 开着，egui 版 / Tauri 版行为一字未变**——已用 `cargo check -p decem-app`
+与 `cargo test -p decem-core`（两种配置各跑一遍，17+4 个测试全过）验证。
+
+### 9.3 实测（Windows，release 构建）
+
+| 项 | 结论 |
+| --- | --- |
+| 发一条真实消息拿到回复 | ✅ 模型按人格回复，流式逐块出现 |
+| 带代码块与表格的回复 | ✅ `CodeBlock` 带底色与 Copy 按钮；表格列对齐、表头有底色 |
+| **Windows 原生 TLS** | ✅ **没撞证书吊销检查**（Windows 上走 WinHTTP），不需要换 rustls 客户端 |
+| Esc 中断真实流 | ✅ 中断后内容立刻停住，再等 4s 截图字节完全相同（零增长） |
+| 中文输入法 / 流式动画 / 气泡贴文字 | ✅ 与阶段 1 一致 |
+
+### 9.4 已知缺口（阶段 3 或以后处理）
+
+- **非 2xx 的错误路径没有真实触发测试**：`upstream_error()` 会从响应体里抠 `error` /
+  `error.message` / `message` 并作为一条 char 消息展示，逻辑写了但没在真实 4xx/5xx 上验过。
+- **流中途的错误事件被静默忽略**：若上游在流里塞 `data: {"error":...}`，`parse_sse_line`
+  返回 `Ignore`。**网页版 / egui / Tauri 三个实现都一样**，不是这次引入的，但确实是缺口。
+- **没有重试**（与现有实现一致）。
+- **模型写死为 `DEFAULT_MODEL`**；图片消息、重新生成、清空记录、设置与持久化都还没做（阶段 3）。
+- `Limits` 调到了 `total_timeout = 600s` / `max_body_bytes = 8MB`（默认 60s / 1MB 对长回复太紧）。

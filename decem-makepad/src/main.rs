@@ -1,19 +1,27 @@
-//! Decem Chat 的 Makepad 版 —— 阶段 1：聊天骨架。
+//! Decem Chat 的 Makepad 版 —— 阶段 2：真实网络。
 //!
-//! 这一阶段**不接网络**，用一个进程内的模拟上游把字块吐出来，先把 Makepad 本身证伪：
-//! 消息列表、输入框（含中文输入法）、回车发送、流式打字机、长消息换行与滚动。
+//! 上游是 `https://api.valedecem.top:8443/api/chat`（nginx → 服务端，Key 在服务器侧）。
+//! 网络走 `makepad-platform` 自带的**阻塞 HTTP**（`blocking_http`，HTTPS、只走一跳），
+//! 响应体边到边写进一个 `std::io::Write`，那个 writer 就地喂 SSE 解析器。
+//! 解析器与请求编排复用 `decem-core`（只取纯逻辑，不带 reqwest）。
 //!
-//! 结构照 `makepad/examples/aichat` 的 proven 模式：
-//! 全局 `RwLock` 状态 + 工作线程 → channel → `SignalToUI` 唤醒 UI → `handle_event` 里轮询。
+//! 线程模型照 `makepad/examples/aichat` 的 proven 模式：
+//! 工作线程 → channel → `SignalToUI` 唤醒 UI → `handle_event` 里轮询 → 流式动画。
 
 pub use makepad_widgets;
 
 use makepad_widgets::desktop_style::{self, DesktopStyle, StyleSheet};
+use makepad_widgets::makepad_platform::makepad_network::blocking_http::{
+    self, CancelToken, Limits, Request,
+};
 use makepad_widgets::makepad_platform::thread::SignalToUI;
 use makepad_widgets::*;
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, RwLock};
+use decem_core::{
+    parse_sse_line, ChatRequest, Message, MessageRole, SseDecoder, SseOutcome, DEFAULT_MODEL,
+};
+
+use std::sync::{mpsc, RwLock};
 use std::time::Duration;
 
 app_main!(App);
@@ -45,59 +53,182 @@ static CHAT: RwLock<Chat> = RwLock::new(Chat {
 
 const WELCOME: &str = "🦊 狐狸来啦～ (≧▽≦)/～ ❤️ 你终于来找我玩啦！嗷呜～";
 
-/// 模拟上游的回复：刻意包含中文、全角标点、emoji、代码块与表格，
-/// 一次把阶段 1 的几个关注点都过一遍。
-fn simulated_reply() -> String {
-    "收到啦～这是**模拟上游**吐出来的回复，用来验证流式打字机。\n\n\
-     中文与全角标点：你好，世界！？～（）【】\n\n\
-     emoji 测试：🦊 ❤️ 🎉\n\n\
-     ```rust\nfn main() { println!(hi); }\n```\n\n\
-     | 元素 | 符号 | 备注 |\n| --- | --- | --- |\n| 中文 | **粗体** | 全角：？！～ |\n| emoji | 🦊 | 彩色 |\n\n\
-     长文本换行：这是一段刻意写长的中文，用来观察在列表里它会不会正常换行、行距是否舒服。"
-        .to_owned()
+/// 往聊天里追一条 char 消息，并把流式状态收干净。
+/// 阶段 2 用它呈现错误（阶段 3 再决定要不要单独的错误样式）。
+fn push_message(text: String) {
+    let mut chat = CHAT.write().unwrap();
+    chat.streaming.clear();
+    chat.is_streaming = false;
+    chat.messages.push(Msg {
+        role: Role::Char,
+        text,
+    });
 }
 
-// ---------------------------------------------------------------- 模拟上游
+/// 后端地址。API Key 在服务器侧，客户端不带任何鉴权头。
+/// 与 `crates/decem-core`（`provider::API_URL`）及 `crates/decem-app` 的值保持一致。
+const API_URL: &str = "https://api.valedecem.top:8443/api/chat";
+
+/// 默认模型。模型表与能力查询都在 `decem_core::models` 里，阶段 3 再做切换面板。
+const MODEL: &str = DEFAULT_MODEL;
+
+// ---------------------------------------------------------------- 真实上游
 
 enum WorkerEvent {
+    /// 一段增量文本。
     Delta(String),
+    /// 流正常结束。
     Done,
+    /// 失败原因，直接当作一条消息展示。
+    Failed(String),
+}
+
+/// 把响应体喂给 SSE 解析器，再把增量推给 UI。
+///
+/// `blocking_http` 按网络到达的顺序调 `write`，所以这里看到的就是真实的**分包边界**：
+/// 一个事件被拆到两个包、半个多字节字符落在包尾，都由 `SseDecoder` 兜着（它有单元测试）。
+struct SseSink {
+    decoder: SseDecoder,
+    tx: mpsc::Sender<WorkerEvent>,
+    cancel: CancelToken,
+    /// 响应体开头的一段：非 2xx 时用它抠出可读的错误原因。
+    preview: Vec<u8>,
+}
+
+/// 错误体保留上限，放得下一段 JSON 说明就够。
+const ERROR_PREVIEW_BYTES: usize = 2048;
+
+impl std::io::Write for SseSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.cancel.is_cancelled() {
+            // Esc 中断：用 IO 错误让阻塞中的请求尽快收场，
+            // 调用方靠 cancel token 区分「被取消」与「真失败」
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "cancelled",
+            ));
+        }
+        if self.preview.len() < ERROR_PREVIEW_BYTES {
+            let room = ERROR_PREVIEW_BYTES - self.preview.len();
+            self.preview.extend_from_slice(&buf[..buf.len().min(room)]);
+        }
+
+        let lines = self.decoder.push(buf);
+        for line in lines {
+            match parse_sse_line(&line) {
+                SseOutcome::Delta(text) | SseOutcome::Full(text) => {
+                    if self.tx.send(WorkerEvent::Delta(text)).is_err() {
+                        // UI 侧已经不要了（channel 断了）：让请求尽早停下来
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::BrokenPipe,
+                            "receiver gone",
+                        ));
+                    }
+                    SignalToUI::set_ui_signal();
+                }
+                SseOutcome::Done | SseOutcome::Ignore => {}
+            }
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// 从非 2xx 的响应体里抠出一句能给用户看的原因。
+///
+/// 服务端固定回 `{"error": "..."}`，这里顺带兼容 `{"error":{"message":...}}` 与 `{"message":...}`
+/// （和 `decem-core` 的 `provider.rs`、网页版的 `aiApi.ts` 取法一致）。
+fn upstream_error(status: u16, body: &[u8]) -> String {
+    let text = String::from_utf8_lossy(body);
+    let reason = serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("error")
+                .and_then(|error| {
+                    error
+                        .as_str()
+                        .map(str::to_owned)
+                        .or_else(|| error.get("message")?.as_str().map(str::to_owned))
+                })
+                .or_else(|| value.get("message")?.as_str().map(str::to_owned))
+        })
+        .unwrap_or_else(|| text.trim().chars().take(200).collect());
+    if reason.is_empty() {
+        format!("上游返回 HTTP {status}")
+    } else {
+        format!("上游返回 HTTP {status}：{reason}")
+    }
 }
 
 struct Worker {
     rx: mpsc::Receiver<WorkerEvent>,
-    cancel: Arc<AtomicBool>,
+    cancel: CancelToken,
 }
 
 impl Worker {
-    /// 起一个线程，按 3 个字符一批、每批 28ms 的节奏吐字块（模拟 SSE 的字块到达）。
-    fn spawn_simulated(reply: String) -> Self {
+    /// 起一个线程发请求，SSE 增量边收边推给 UI。
+    fn spawn_chat(body: Vec<u8>) -> Self {
         let (tx, rx) = mpsc::channel();
-        let cancel = Arc::new(AtomicBool::new(false));
-        let flag = cancel.clone();
+        let cancel = CancelToken::new();
+        let token = cancel.clone();
 
         std::thread::spawn(move || {
-            let mut buf = String::new();
-            for ch in reply.chars() {
-                if flag.load(Ordering::Relaxed) {
+            let limits = Limits {
+                // 默认 60s / 1MB 对长回复太紧；nginx 那边给的是 1 小时
+                total_timeout: Duration::from_secs(600),
+                max_body_bytes: 8 * 1024 * 1024,
+                ..Limits::default()
+            };
+            let request = match Request::post(API_URL)
+                .json_body(body)
+                .map(|request| request.limits(limits).cancel_token(token.clone()))
+            {
+                Ok(request) => request,
+                Err(err) => {
+                    let _ = tx.send(WorkerEvent::Failed(format!("请求构造失败：{err}")));
+                    SignalToUI::set_ui_signal();
                     return;
                 }
-                buf.push(ch);
-                if buf.chars().count() >= 3 {
-                    if tx
-                        .send(WorkerEvent::Delta(std::mem::take(&mut buf)))
-                        .is_err()
-                    {
-                        return;
+            };
+
+            let mut sink = SseSink {
+                decoder: SseDecoder::new(),
+                tx: tx.clone(),
+                cancel: token.clone(),
+                preview: Vec::new(),
+            };
+            let outcome = blocking_http::request_to_writer_no_redirect(request, &mut sink);
+
+            match outcome {
+                Ok(response) if (200..300).contains(&response.status) => {
+                    // 流结束时补吐最后一段没有换行结尾的残留（否则最后一行会丢）
+                    if let Some(line) = sink.decoder.finish() {
+                        if let SseOutcome::Delta(text) | SseOutcome::Full(text) =
+                            parse_sse_line(&line)
+                        {
+                            let _ = tx.send(WorkerEvent::Delta(text));
+                        }
                     }
-                    SignalToUI::set_ui_signal();
-                    std::thread::sleep(Duration::from_millis(28));
+                    let _ = tx.send(WorkerEvent::Done);
+                }
+                Ok(response) => {
+                    let _ = tx.send(WorkerEvent::Failed(upstream_error(
+                        response.status,
+                        &sink.preview,
+                    )));
+                }
+                // 被取消：已流出的内容照样定格成一条消息
+                Err(_) if token.is_cancelled() => {
+                    let _ = tx.send(WorkerEvent::Done);
+                }
+                Err(err) => {
+                    let _ = tx.send(WorkerEvent::Failed(format!("连接失败：{err}")));
                 }
             }
-            if !buf.is_empty() && !flag.load(Ordering::Relaxed) {
-                let _ = tx.send(WorkerEvent::Delta(buf));
-            }
-            let _ = tx.send(WorkerEvent::Done);
             SignalToUI::set_ui_signal();
         });
 
@@ -105,7 +236,7 @@ impl Worker {
     }
 
     fn cancel(&self) {
-        self.cancel.store(true, Ordering::Relaxed);
+        self.cancel.cancel();
     }
 
     fn poll(&self) -> Vec<WorkerEvent> {
@@ -298,7 +429,8 @@ impl App {
         }
         input.set_text(cx, "");
 
-        let items_len = {
+        // 组请求体与拿列表长度都在同一把锁里做完，避免中途被 UI 线程插队
+        let (payload, items_len) = {
             let mut chat = CHAT.write().unwrap();
             chat.messages.push(Msg {
                 role: Role::User,
@@ -306,10 +438,33 @@ impl App {
             });
             chat.streaming.clear();
             chat.is_streaming = true;
-            chat.messages.len() + 1
+
+            // system 提示词 + 最近 10 条由 `ChatRequest::new` 负责编排
+            let history: Vec<Message> = chat
+                .messages
+                .iter()
+                .enumerate()
+                .map(|(index, msg)| {
+                    let role = match msg.role {
+                        Role::User => MessageRole::User,
+                        Role::Char => MessageRole::Assistant,
+                    };
+                    Message::text(index.to_string(), role, msg.text.as_str(), 0)
+                })
+                .collect();
+            let request = ChatRequest::new(MODEL, &history);
+            let payload = serde_json::to_vec(&request.to_upstream())
+                .map_err(|err| format!("请求体序列化失败：{err}"));
+            (payload, chat.messages.len() + 1)
         };
 
-        self.worker = Some(Worker::spawn_simulated(simulated_reply()));
+        match payload {
+            Ok(body) => self.worker = Some(Worker::spawn_chat(body)),
+            Err(reason) => {
+                push_message(format!("⚠️ {reason}"));
+                self.worker = None;
+            }
+        }
 
         let list = self
             .ui
@@ -349,15 +504,22 @@ impl App {
         };
         let had_events = !events.is_empty();
         let mut done = false;
+        let mut failed = None;
         for event in events {
             match event {
                 WorkerEvent::Delta(delta) => {
                     CHAT.write().unwrap().streaming.push_str(&delta);
                 }
                 WorkerEvent::Done => done = true,
+                WorkerEvent::Failed(reason) => failed = Some(reason),
             }
         }
-        if done {
+        if let Some(reason) = failed {
+            // 已经流出来的部分照样定格，失败原因单独作为一条消息
+            self.finish_stream();
+            push_message(format!("⚠️ {reason}"));
+            self.worker = None;
+        } else if done {
             self.finish_stream();
             self.worker = None;
         }
