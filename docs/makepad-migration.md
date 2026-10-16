@@ -372,3 +372,23 @@ Makepad 侧用 `default-features = false` 引入。
 - **`DECEM_IMAGE=<路径>` 启动钩子**：把一张图直接放进待发槽位，用来在**系统文件对话框
   无法被自动化驱动**（模态窗口，焦点会被 CU 覆盖层截走）的情况下验后半条链。
   与 `DECEM_STRESS` 同性质，不是给用户用的开关。
+
+## 11. 阶段 3 之二：重新生成 + 清空记录（2026-10-16，已实装）
+
+由子代理按 §10 同级别的侦察报告实现，我在真机上验证并修掉两处**只有运行期才暴露**的问题。
+
+**重新生成**：最后一条 char 气泡旁边挂按钮（`PortalList` 逐项动作 + `set_visible` 控显隐），
+流式时隐藏；`App::regenerate` 在锁内 `rposition` 找最后一条 user、`truncate` 到它、
+用截断后的历史重新请求；`worker.is_some()` 守门（照 egui 版——网页版这里其实有缺陷）。
+请求体拼装抽成 `build_request_body`，send / regenerate 共用。
+
+**清空**：输入行最左的「清空」→ 内置 `Modal` 二次确认（取消 / 确认清空；
+遮罩与 Esc 由 Modal 的 `can_dismiss` 免费提供）→ 先 `worker.cancel()` 再清 messages、只留欢迎语。
+
+### 11.1 两个「编译期看不见」的坑（务必记住）
+
+1. **`Image` 没有 `align` 属性**。写了会报
+   `[E] property align not defined on type`——**Splash 是运行期解析的，`cargo check` 看不见**，
+   只能在 stdout 里看 `[E]` 行。所以改完 UI **必须启动一次并 grep `\[E\]`**。
+2. **`Image` 的宽度必须是 `Fill`**。用 `Fit` 时它会占住一块高度却**不画纹理**
+   （用户气泡变成一块空白橙色方块），看起来像"图没发出去"，其实只是没画。
