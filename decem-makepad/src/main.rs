@@ -84,7 +84,10 @@ impl Worker {
                 }
                 buf.push(ch);
                 if buf.chars().count() >= 3 {
-                    if tx.send(WorkerEvent::Delta(std::mem::take(&mut buf))).is_err() {
+                    if tx
+                        .send(WorkerEvent::Delta(std::mem::take(&mut buf)))
+                        .is_err()
+                    {
                         return;
                     }
                     SignalToUI::set_ui_signal();
@@ -139,8 +142,7 @@ impl Widget for ChatList {
                         if just_started {
                             self.animating = Some(item_id);
                         }
-                        let (item_widget, _) =
-                            list.item_with_existed(cx, item_id, id!(Char));
+                        let (item_widget, _) = list.item_with_existed(cx, item_id, id!(Char));
                         let text = if chat.streaming.is_empty() {
                             "..."
                         } else {
@@ -271,11 +273,7 @@ impl App {
 
 impl MatchEvent for App {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        if self
-            .ui
-            .glass_button(cx, ids!(send_button))
-            .clicked(actions)
-        {
+        if self.ui.glass_button(cx, ids!(send_button)).clicked(actions) {
             self.send(cx);
         }
         if self
@@ -352,7 +350,7 @@ script_mod! {
                 padding: Inset{top: 6 bottom: 6 left: 4 right: 64}
 
                 RoundedView {
-                    width: Fit
+                    width: Fill
                     height: Fit
                     show_bg: true
                     draw_bg.color: #x24242c
@@ -360,9 +358,12 @@ script_mod! {
                     padding: Inset{left: 14 top: 10 right: 14 bottom: 10}
 
                     selectable := Markdown {
-                        width: Fit
+                        width: Fill
+                        height: Fit
                         body: ""
-                        use_code_block_widget: true
+                        // 关掉 CodeView 版代码块：CodeView 属于 makepad-code-editor 这个独立
+                        // crate，不引它就只能走等宽文本回退路径
+                        use_code_block_widget: false
                         use_math_widget: true
                     }
                 }
@@ -376,7 +377,7 @@ script_mod! {
                 padding: Inset{top: 6 bottom: 6 left: 64 right: 4}
 
                 RoundedView {
-                    width: Fit
+                    width: Fill
                     height: Fit
                     show_bg: true
                     draw_bg.color: #xE95620
@@ -384,7 +385,8 @@ script_mod! {
                     padding: Inset{left: 14 top: 10 right: 14 bottom: 10}
 
                     selectable := Markdown {
-                        width: Fit
+                        width: Fill
+                        height: Fit
                         body: ""
                     }
                 }
@@ -395,6 +397,7 @@ script_mod! {
     startup() do #(App::script_component(vm)){
         ui: Root{
             main_window := Window{
+                window.title: "Decem Chat"
                 window.inner_size: vec2(980, 760)
                 body +: {
                     View{
