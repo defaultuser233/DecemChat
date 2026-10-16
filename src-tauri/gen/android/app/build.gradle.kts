@@ -14,6 +14,15 @@ val tauriProperties = Properties().apply {
     }
 }
 
+// 发布签名：keystore.properties 不进仓库（见同目录 .gitignore）。
+// 文件不存在时 release 仍可构建，只是产物不签名（装不上）。
+val keystoreProperties = Properties().apply {
+    val propFile = rootProject.file("keystore.properties")
+    if (propFile.exists()) {
+        propFile.inputStream().use { load(it) }
+    }
+}
+
 android {
     compileSdk = 37
     namespace = "top.valedecem.DecemChat"
@@ -24,6 +33,16 @@ android {
         targetSdk = 37
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
+    }
+    signingConfigs {
+        if (!keystoreProperties.isEmpty()) {
+            create("release") {
+                storeFile = file(keystoreProperties.getProperty("storeFile"))
+                storePassword = keystoreProperties.getProperty("storePassword")
+                keyAlias = keystoreProperties.getProperty("keyAlias")
+                keyPassword = keystoreProperties.getProperty("keyPassword")
+            }
+        }
     }
     buildTypes {
         getByName("debug") {
@@ -39,8 +58,15 @@ android {
             }
         }
         getByName("release") {
+            // 界面是从本机 http://127.0.0.1:<端口> 加载的，默认的 false 会让 WebView
+            // 拒绝加载明文页面（打开就是白屏）。这个 App 只连本机与 HTTPS 上游，
+            // 放开明文的风险可接受。
+            manifestPlaceholders["usesCleartextTraffic"] = "true"
             optimization {
                enable = true
+            }
+            if (!keystoreProperties.isEmpty()) {
+                signingConfig = signingConfigs.getByName("release")
             }
             proguardFiles(
                 *fileTree(".") {
