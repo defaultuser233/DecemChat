@@ -478,14 +478,20 @@ impl Widget for ChatList {
                         // 图片只在部件**新建**时解一次。`load_image_from_data` 每次都真解码，
                         // 而这条路径每帧都会跑到，无条件调就是每帧重解码。`existed` 帮我们
                         // 分清「新建」和「复用」；部件被回收后再滚回来会重建，于是自然重解一次。
+                        // 一条消息的图不会变，所以显隐也在这里一次性设好。
                         if !existed && msg.role == Role::User {
                             let photo = item_widget.image(cx, ids!(photo));
                             match &msg.image {
-                                // 选图那一刻已经解成功过一次，这里再失败就只是不显示
                                 Some(attachment) => {
+                                    photo.set_visible(cx, true);
+                                    // 选图那一刻已经解成功过一次，这里再失败就只是不显示
                                     let _ = photo.load_image_from_data(cx, &attachment.bytes);
                                 }
-                                None => photo.set_texture(cx, None),
+                                None => {
+                                    // 空的 Image 在 Fit/Smallest 下会占住请求高度，
+                                    // 纯文字消息的气泡会被撑成一大块空白 —— 必须显式隐藏
+                                    photo.set_visible(cx, false);
+                                }
                             }
                         }
                         *BUBBLE_BODY.write().unwrap() =
@@ -840,6 +846,9 @@ impl MatchEvent for App {
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         crate::makepad_widgets::script_mod(vm);
+        // CodeView（带语法高亮的代码块）属于独立的 makepad-code-editor crate，
+        // 必须先注册它的脚本部件，下面 script_mod! 里的 `use mod.widgets.CodeView` 才能解析
+        makepad_code_editor::script_mod(vm);
         // 近黑 + 橙的风格（Makepad 自带），与 Decem 的调性接近
         desktop_style::install(vm, StyleSheet::load(DesktopStyle::BlackOrange));
         self::script_mod(vm)
@@ -882,9 +891,10 @@ impl AppMain for App {
 
 script_mod! {
     use mod.prelude.widgets.*
-    // 代码块用 makepad-widgets 自带的 CodeBlock：它在 Fit 宽度下会量最长行。
-    // 别用 CodeView —— 那属于独立的 makepad-code-editor crate，不引它模板会静默失效。
-    use mod.widgets.CodeBlock
+    // 代码块用 makepad-code-editor 的 CodeView：自带语法高亮（默认 TokenColors 主题，
+    // code_editor/src/code_editor.rs:26-48）。它不在 makepad-widgets 里，
+    // AppMain::script_mod 已先调 makepad_code_editor::script_mod 注册。
+    use mod.widgets.CodeView
 
     // 气泡定宽容器：自己量正文宽度，短消息贴文字、长消息到上限换行。
     // 见 docs/makepad-migration.md §6.2
@@ -936,10 +946,20 @@ script_mod! {
                             code_block := View {
                                 width: Fill
                                 height: Fit
-                                code_view := CodeBlock {
-                                    width: Fill
-                                    height: Fit
-                                    show_line_numbers: false
+                                // CodeView 的 walk 取自 editor 字段（code_view.rs:60-62），
+                                // 宽高与底色都要在 editor +: 里给，实例上写 width/height 会运行期报错。
+                                code_view := CodeView {
+                                    // 聊天里的代码块只读：光标不粘末尾、不响应输入
+                                    keep_cursor_at_end: false
+                                    editor +: {
+                                        height: Fit
+                                        // 只读（code_editor.rs:293）；行号 gutter 关掉（code_editor.rs:295），与网页版一致
+                                        read_only: true
+                                        show_gutter: false
+                                        // 底色与网页版 pre 一致：rgba(0,0,0,0.3)（MessageBubble.tsx 的 bg-black/30），
+                                        // 铺在气泡底色 #x24242c 上约等于深蓝黑
+                                        draw_bg +: { color: #x0000004D }
+                                    }
                                 }
                             }
                         }

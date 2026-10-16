@@ -119,6 +119,7 @@ version = "0.1.0"
 dependencies = [
  "decem-core",
  "makepad-base64",
+ "makepad-code-editor",
  "makepad-widgets",
  "serde_json",
 ]
@@ -225,6 +226,23 @@ source = "git+https://github.com/makepad/makepad?branch=dev#71c9ddcbb9c01dd208f9
 name = "makepad-byteorder-lite"
 version = "0.1.0"
 source = "git+https://github.com/makepad/makepad?branch=dev#71c9ddcbb9c01dd208f99621fdd71024a5d35c65"
+
+[[package]]
+name = "makepad-code-editor"
+version = "2.0.0"
+source = "git+https://github.com/makepad/makepad?branch=dev#71c9ddcbb9c01dd208f99621fdd71024a5d35c65"
+dependencies = [
+ "makepad-code-language",
+ "makepad-widgets",
+]
+
+[[package]]
+name = "makepad-code-language"
+version = "0.1.0"
+source = "git+https://github.com/makepad/makepad?branch=dev#71c9ddcbb9c01dd208f99621fdd71024a5d35c65"
+dependencies = [
+ "pulldown-cmark",
+]
 
 [[package]]
 name = "makepad-derive-wasm-bridge"
