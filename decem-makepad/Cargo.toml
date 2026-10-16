@@ -1,0 +1,17 @@
+[package]
+name = "decem-makepad"
+version = "0.1.0"
+edition = "2021"
+
+# 独立 crate + 自带 workspace：Makepad 那一大堆 vendored 依赖不会被并进主仓库的
+# cargo clippy --workspace（现有 CI 不受影响）
+[workspace]
+
+[dependencies]
+# 只开需要的 family：rich_text（含 Markdown）、glass（输入框与按钮的样式）
+makepad-widgets = { git = "https://github.com/makepad/makepad", branch = "dev", default-features = false, features = ["rich_text", "glass"] }
+
+# 与 Makepad 仓库自身的建议一致：release 保持增量、不开 LTO
+[profile.release]
+incremental = true
+lto = false
