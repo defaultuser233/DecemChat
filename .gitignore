@@ -14,3 +14,6 @@ node_modules/
 # Android 构建产物：体积很大（debug APK 约 175MB），不要提交
 *.apk
 *.aab
+
+# Makepad 版是独立 crate（自带 workspace），它的 target/ 与仓库根的不是同一个
+decem-makepad/target/
