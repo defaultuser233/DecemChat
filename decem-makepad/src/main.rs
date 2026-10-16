@@ -113,6 +113,96 @@ impl Worker {
     }
 }
 
+// ---------------------------------------------------------------- 气泡定宽
+
+/// `ChatList` 画每一项之前把它放进来，`Bubble` 在自己 `draw_walk` 里取。
+/// 绘制是同一线程、逐项同步进行的，所以一个「当前项」槽位就够。
+static BUBBLE_BODY: RwLock<Option<(String, bool)>> = RwLock::new(None);
+
+/// 正文里有没有块级元素。代码块和表格的宽度不由正文字号决定，量文字没有意义，
+/// 这类消息直接用满宽。
+fn has_block_content(text: &str) -> bool {
+    text.contains("```") || text.contains("\n|")
+}
+
+/// 量宽容器：先按上限把正文量一遍，再用**量出来的实际宽度**给气泡定宽，
+/// 于是短消息贴着文字、长消息到上限换行。
+///
+/// 为什么非自己量不可：`Markdown`/`TextFlow` 的换行宽度取的是外层 turtle 的内宽
+/// （`widgets/families/rich_text/src/text_flow.rs:2554-2559`），而 `Fit` 的 turtle
+/// 没有确定宽度（NaN）就不换行 —— 长文本会直接溢出被裁。Makepad 自带的
+/// `ChatBubble` 用的是同一个办法（`widgets/families/extras/src/chat.rs:903-924`）：
+/// 按上限把文字排一遍，拿用到的宽度决定气泡多宽。这里照它写，内容仍交给
+/// `Markdown` 画（官方注释也说了：需要标题和链接的消息是「气泡形容器里的
+/// Markdown」，不是更大的气泡 —— chat.rs:31-34）。
+#[derive(Script, ScriptHook, Widget)]
+pub struct Bubble {
+    #[deref]
+    view: View,
+    /// 只用来量正文宽度。字体必须与 Markdown 正文一致
+    #[live]
+    draw_text: DrawText,
+    /// 气泡最宽多少
+    #[live(560.0)]
+    cap_width: f64,
+    /// 气泡的左右内边距之和（与模板里 RoundedView 的 padding 对应）
+    #[live(28.0)]
+    pad_x: f64,
+}
+
+impl Widget for Bubble {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        let (body, blocky) = BUBBLE_BODY
+            .read()
+            .map(|slot| slot.clone())
+            .unwrap_or(None)
+            .unwrap_or_default();
+
+        // 此刻最上层还是外层行（Fill），所以这个内宽是确定的
+        let row_w = cx.turtle().inner_rect().size.x;
+        let row_w = if row_w.is_finite() {
+            row_w
+        } else {
+            self.cap_width
+        };
+        let cap = row_w.clamp(60.0, self.cap_width);
+        let inner_cap = (cap - self.pad_x).max(24.0);
+
+        let width = if blocky || body.is_empty() {
+            cap
+        } else {
+            let scale = (self.draw_text.font_scale as f64).max(0.0001);
+            let laid = self.draw_text.layout(
+                cx,
+                0.0,
+                0.0,
+                Some((inner_cap / scale) as f32),
+                true,
+                Align::default(),
+                &body,
+            );
+            let used = laid.size_in_lpxs.width as f64 * scale;
+            // 余量：这只测量实例与 Markdown 的渲染实例不是同一个，
+            // emoji 与字距会有几像素出入，不够余量就会提前折行
+            (used + self.pad_x + 8.0).clamp(60.0, cap)
+        };
+
+        // 给子部件一个确定宽度：Markdown 的换行宽度就是从这里来的。
+        // 子层的 step 自己走完再交回 done —— 这一层没有需要上层驱动的部件
+        // （PortalList 之类），照 Widget::draw_all 的循环语义来
+        let child = Walk {
+            width: Size::Fixed(width),
+            height: Size::fit(),
+            ..walk
+        };
+        let mut step = self.view.draw_walk(cx, scope, child);
+        while step.is_step() {
+            step = self.view.draw_walk(cx, scope, child);
+        }
+        DrawStep::done()
+    }
+}
+
 // ---------------------------------------------------------------- 消息列表
 
 /// 包一层 PortalList：列表项的文字必须由 Rust 侧按数据逐项写入。
@@ -155,7 +245,10 @@ impl Widget for ChatList {
                         } else {
                             markdown.start_streaming_animation();
                         }
+                        *BUBBLE_BODY.write().unwrap() =
+                            Some((text.to_owned(), has_block_content(text)));
                         item_widget.draw_all_unscoped(cx);
+                        *BUBBLE_BODY.write().unwrap() = None;
                         continue;
                     }
 
@@ -171,7 +264,10 @@ impl Widget for ChatList {
                         if was_animating {
                             markdown.stop_streaming_animation();
                         }
+                        *BUBBLE_BODY.write().unwrap() =
+                            Some((msg.text.clone(), has_block_content(&msg.text)));
                         item_widget.draw_all_unscoped(cx);
+                        *BUBBLE_BODY.write().unwrap() = None;
                         if was_animating && markdown.is_streaming_animation_done() {
                             self.animating = None;
                         }
@@ -333,6 +429,17 @@ script_mod! {
     // 别用 CodeView —— 那属于独立的 makepad-code-editor crate，不引它模板会静默失效。
     use mod.widgets.CodeBlock
 
+    // 气泡定宽容器：自己量正文宽度，短消息贴文字、长消息到上限换行。
+    // 见 docs/makepad-migration.md §6.2
+    let Bubble = #(Bubble::register_widget(vm)) {
+        width: Fit
+        height: Fit
+        // 量宽用的字体必须与 Markdown 正文一致（markdown.rs:101-102）
+        draw_text +: { text_style: theme.font_regular{font_size: theme.font_size_p} }
+        cap_width: 560.0
+        pad_x: 28.0
+    }
+
     let ChatList = #(ChatList::register_widget(vm)) {
         width: Fill
         height: Fill
@@ -352,31 +459,31 @@ script_mod! {
                 align: Align{x: 0.0}
                 padding: Inset{top: 6 bottom: 6 left: 4 right: 64}
 
-                RoundedView {
-                    width: Fill
-                    height: Fit
-                    show_bg: true
-                    draw_bg.color: #x24242c
-                    draw_bg.border_radius: uniform(16.)
-                    padding: Inset{left: 14 top: 10 right: 14 bottom: 10}
-
-                    selectable := Markdown {
-                        // 必须是 Fill。Markdown 的 Fit 量的是"最长行的自然宽度"、不换行，
-                        // 一旦内容比窗口宽就会溢出被裁（窄窗口/手机上是致命的）；
-                        // 而且表格的单元格宽度 = 行的 inner_width / 列数，行宽为 0 整表塌掉。
-                        // 详见 docs/makepad-migration.md §6.2
+                bubble := Bubble {
+                    RoundedView {
                         width: Fill
                         height: Fit
-                        body: ""
-                        use_code_block_widget: true
-                        use_math_widget: true
-                        code_block := View {
+                        show_bg: true
+                        draw_bg.color: #x24242c
+                        draw_bg.border_radius: uniform(16.)
+                        padding: Inset{left: 14 top: 10 right: 14 bottom: 10}
+
+                        selectable := Markdown {
+                            // 这里必须是 Fill：Bubble 已经把确定宽度给了外层，
+                            // Fill 才能拿到它并按它换行
                             width: Fill
                             height: Fit
-                            code_view := CodeBlock {
+                            body: ""
+                            use_code_block_widget: true
+                            use_math_widget: true
+                            code_block := View {
                                 width: Fill
                                 height: Fit
-                                show_line_numbers: false
+                                code_view := CodeBlock {
+                                    width: Fill
+                                    height: Fit
+                                    show_line_numbers: false
+                                }
                             }
                         }
                     }
@@ -390,18 +497,20 @@ script_mod! {
                 align: Align{x: 1.0}
                 padding: Inset{top: 6 bottom: 6 left: 64 right: 4}
 
-                RoundedView {
-                    width: Fill
-                    height: Fit
-                    show_bg: true
-                    draw_bg.color: #xE95620
-                    draw_bg.border_radius: uniform(16.)
-                    padding: Inset{left: 14 top: 10 right: 14 bottom: 10}
-
-                    selectable := Markdown {
+                bubble := Bubble {
+                    RoundedView {
                         width: Fill
                         height: Fit
-                        body: ""
+                        show_bg: true
+                        draw_bg.color: #xE95620
+                        draw_bg.border_radius: uniform(16.)
+                        padding: Inset{left: 14 top: 10 right: 14 bottom: 10}
+
+                        selectable := Markdown {
+                            width: Fill
+                            height: Fit
+                            body: ""
+                        }
                     }
                 }
             }
