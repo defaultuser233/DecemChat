@@ -120,48 +120,98 @@ cargo makepad android --abi=aarch64 --sdk-path='D:/Android/Sdk' \
 ## 6. 必读的三个坑（完整版见 `docs/makepad-probe.md` §5）
 
 1. **不装暗色风格** → 行内代码在高亮块上几乎看不见（浅色主题压自绘深底）
-2. **Markdown 必须 `width: Fill`，气泡也必须 `width: Fill`** —— 这是阶段 1 最大的坑，展开见下
+2. **气泡与 Markdown 都必须是 `width: Fill`** —— 阶段 1 最大的坑，完整分析见 §6.2
 3. **气泡底色别与行内代码底色用同一个主题变量**（`theme.color_bg_highlight` 会糊在一起）
 
-### 6.1 代码块为什么是空白
+### 6.1 代码块：`code_block` 模板是必填的
 
-`Markdown` 的 `use_code_block_widget: true` 走的是 `code_block` 模板里的 `CodeView`，
-而 **`CodeView` 属于独立 crate `makepad-code-editor`，不在 `makepad-widgets` 里**：
+**Makepad 没有默认的 `code_block` 模板**（`markdown.rs` 与 `text_flow.rs` 里都没有）。
+`use_code_block_widget: true` 会去找 `id!(code_block)` 这个模板，里面**必须有一个叫 `code_view`
+的子部件**——`markdown.rs:455-458` 是这样把内容塞进去的：
 
-- 不引这个 crate、却写了 `use mod.widgets.CodeView` → 运行时脚本报
-  `property CodeView not found in prototype chain`，整个 `code_block` 模板失效，
-  代码块只留一段空白高度（不报编译错误，只在**运行时 stdout** 里有 `[E]` 行，很容易漏看）
-- 两个选择：
-  - **回退路径（当前采用）**：`use_code_block_widget: false` → 等宽文本渲染，无语法高亮，零额外依赖
-  - **高亮路径（阶段 3 可选）**：`Cargo.toml` 加 `makepad-code-editor`，并在 `script_mod` 里
-    调 `makepad_code_editor::script_mod(vm)`（该函数在 `code_editor/src/lib.rs:33`），
-    再按 `examples/aichat/src/main.rs:152-160` 写 `code_block := View{ ... CodeView ... }`
-
-### 6.2 `Fit` 气泡会把代码块和表格压没
-
-气泡用 `width: Fit` 时，气泡宽度由内容决定；而代码块与表格是 `Fill` 的块，
-`Fill` 套在 `Fit` 里宽度解析成 0 → **内容看不见、只剩高度**（气泡里一片空白）。
-中间还踩过一步：把内层 `Markdown` 改成 `Fill` 但气泡仍是 `Fit`，结果整条气泡塌成
-**约 40px 宽的竖条、逐字换行**（把「宽度归零」暴露得更彻底）。
-
-✅ 正确结构（照 `examples/aichat` 的 proven 写法，`main.rs:42-63` 与 `:136-141`）：
-
-```
-View { width: Fill  padding: Inset{... right: 64}     // 行：靠内边距产生"最大宽度"
-    RoundedView { width: Fill  height: Fit ... }
-        Markdown { width: Fill  height: Fit }
-}
+```rust
+tf.item_with(cx, entry_id, id!(code_block), |cx, item, _tf| {
+    item.widget(cx, ids!(code_view)).set_text(cx, cbs);   // ← 名字写死是 code_view
+    item.draw_all_unscoped(cx);
+});
 ```
 
-❌ 代价：气泡不再"贴着文字"，短消息也是一条通栏。取舍待阶段 3 定，可选折中——
-按消息内容挑模板（含 ``` 或 `|` 的用 Fill，纯文本的用 Fit）。
+模板缺失或写错，**不会报编译错误**，只在运行时 stdout 里留一行 `[E]`，代码块表现为
+"占了一段高度但什么都没有"。填内容有两种部件：
+
+| 用哪个 | 归属 | 代价 | 长得像 |
+| --- | --- | --- | --- |
+| **`CodeBlock`（当前采用）** | `makepad-widgets`（`widgets/core/src/code_block.rs:58`） | 无，不用加依赖 | 深色底 + Copy 按钮，无语法高亮 |
+| `CodeView` | 独立 crate `makepad-code-editor` | 要加依赖 + 在 `script_mod` 里调 `makepad_code_editor::script_mod(vm)`（`code_editor/src/lib.rs:33`） | 真编辑器，可编辑 |
+| `use_code_block_widget: false` | — | 无 | 纯等宽文本，连底色都没有（最丑的兜底） |
+
+`CodeBlock` 还有个关键优势：它在 `Fit` 宽度下会**主动去量最长行**（`code_block.rs:729-737`），
+所以是唯一能在贴文字的气泡里正常工作的代码块。
+
+### 6.2 宽度模型：为什么「贴文字」和「正常换行」不能兼得
+
+这一节是阶段 1 踩得最久的地方，三个事实叠在一起：
+
+**① `Fill` 不是「100% 父宽」，是 flex 式的增长。**
+
+```rust
+// draw/src/turtle.rs:311-325
+Fill { weight: f64, basis: FitBound /*默认 Abs(0.0)*/, shrink: f64, min, max }
+```
+
+`basis` 默认 0，靠 `weight` 分父容器的**剩余宽度**。父容器自己是 `Fit`（还没算出宽度）时
+没有"剩余"可分 → 子元素宽度 = basis = **0**。这就是 `Fit` 气泡里代码块/表格变空白的机制。
+（试错记录：只把内层 `Markdown` 改成 `Fill`、气泡仍是 `Fit`，整条气泡会塌成约 40px 宽的竖条、
+逐字换行，把"宽度归零"暴露得更彻底。）
+
+**② Markdown 的 `Fit` 量的是最长行的自然宽度，不换行。**
+
+`width: Fit` 的 Markdown 不会在容器里折行，而是把最长那行完整撑开。后果：
+- 长段落 → 气泡比窗口还宽，**内容被裁掉**（缩窄窗口实测：文字不重排，直接被切）
+- 手机上这是致命的（屏幕才 400 逻辑像素宽）
+
+**③ 表格的单元格宽度 = 行的 `inner_width` ÷ 列数。**
+
+```rust
+// widgets/families/rich_text/src/text_flow.rs:2184-2189
+let cell_width = if self.table_num_columns > 0 {
+    cx.turtle().inner_width() / self.table_num_columns as f64
+} else { 100.0 };
+```
+
+所以**行必须有确定宽度**。行是 `Fill`、外层表是 `Fit` 时行宽为 0 → 每个格子 0 宽 →
+整张表只剩高度。实测把行改成固定值就能正常渲染（列也对齐）：
+
+```
+table_row_walk: Walk{width: Fixed(560) height: Fit}     # 验证过能渲染
+```
+
+但那是写死的像素宽度，窄窗口同样溢出。
+
+**结论**：Makepad 的 `Fit`/`Fill` 是**单趟解析**，没有 CSS 那种 intrinsic sizing
+（先量 max-content、再定父宽、再让子元素 `width:100%` 回填）。所以下面三件事两两互斥，
+不存在一个配置能同时拿到：
+
+| 想要 | `Fit` 气泡 | `Fill` 气泡 |
+| --- | --- | --- |
+| 短消息贴着文字 | ✅ | ❌ 通栏 |
+| 长文本换行 / 窄窗口不溢出 | ❌ 不换行会溢出 | ✅ |
+| 代码块 | ✅（须用 `CodeBlock`） | ✅ |
+| 表格 | ❌ 除非把行宽写死 | ✅ |
+
+**当前采用 `Fill` 气泡**（`width: Fill` 的气泡 + `width: Fill` 的 Markdown，即 aichat 的写法），
+理由是「不溢出」的优先级高于「好看」——聊天 App 要接的是模型任意长度的输出，
+而且最终要上手机。代价就是短消息也占满一行。
+
+真要「贴文字」，只能靠 Rust 侧按内容挑模板（短且单行、无表格 → `Fit`；其余 → `Fill`），
+并且必须加"窗口太窄就退回 `Fill`"的保护。这是阶段 3 的活，动之前先把上面三条记住。
 
 ## 7. 未决 / 只有人能验的
 
 | 项 | 谁 |
 | --- | --- |
 | ~~中文输入法（IME）能否在 Makepad 输入框里正常合成~~ → **已验通**（§3） | ✅ 2026-10-16 |
-| 气泡"贴文字" vs "通栏"的取舍（§6.2 末尾） | 你（阶段 3） |
+| 气泡"贴文字" vs "通栏"：现在采用通栏（安全优先，§6.2）；要贴文字须按内容挑模板 + 窄窗保护 | 你决定要不要做（阶段 3） |
 | Windows 上原生 TLS 是否撞证书吊销检查（兜底：换 rustls 客户端） | 阶段 2 实测 |
 | Makepad 桌面打包工具是否存在/好用 | 阶段 4 核实 |
 | iOS（需 Mac）、macOS/Linux（无机器） | 待条件 |

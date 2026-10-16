@@ -329,6 +329,9 @@ impl AppMain for App {
 
 script_mod! {
     use mod.prelude.widgets.*
+    // 代码块用 makepad-widgets 自带的 CodeBlock：它在 Fit 宽度下会量最长行。
+    // 别用 CodeView —— 那属于独立的 makepad-code-editor crate，不引它模板会静默失效。
+    use mod.widgets.CodeBlock
 
     let ChatList = #(ChatList::register_widget(vm)) {
         width: Fill
@@ -358,13 +361,24 @@ script_mod! {
                     padding: Inset{left: 14 top: 10 right: 14 bottom: 10}
 
                     selectable := Markdown {
+                        // 必须是 Fill。Markdown 的 Fit 量的是"最长行的自然宽度"、不换行，
+                        // 一旦内容比窗口宽就会溢出被裁（窄窗口/手机上是致命的）；
+                        // 而且表格的单元格宽度 = 行的 inner_width / 列数，行宽为 0 整表塌掉。
+                        // 详见 docs/makepad-migration.md §6.2
                         width: Fill
                         height: Fit
                         body: ""
-                        // 关掉 CodeView 版代码块：CodeView 属于 makepad-code-editor 这个独立
-                        // crate，不引它就只能走等宽文本回退路径
-                        use_code_block_widget: false
+                        use_code_block_widget: true
                         use_math_widget: true
+                        code_block := View {
+                            width: Fill
+                            height: Fit
+                            code_view := CodeBlock {
+                                width: Fill
+                                height: Fit
+                                show_line_numbers: false
+                            }
+                        }
                     }
                 }
             }
