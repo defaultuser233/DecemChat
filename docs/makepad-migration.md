@@ -10,7 +10,7 @@
 骨架能跑、中文输入法能上屏、流式打字机正常、300 条长列表滚动跟手；
 现在发出去的是真请求，`decem-core` 的 SSE 解析器接 `blocking_http` 的阻塞流，
 Esc 能中断真实流。证据见 §3 与 §9。
-**下一道门是阶段 3：功能对齐长尾**（图片消息、重新生成、清空、模型切换、设置、持久化……）。
+**阶段 3 进行中**：图片消息已实装并实测（§10），剩下重新生成、清空记录、模型切换、设置与持久化。
 现有实现（网页版 / Tauri 版 / egui 版）**全部保留、一行未动**，继续是主力。
 
 历史坑（都结清了，别再重踩）：
@@ -46,9 +46,10 @@ Esc 能中断真实流。证据见 §3 与 §9。
 → 复用 `decem-core` 的 SSE 解析器与请求编排 → channel + `SignalToUI` 推给 UI → 交给 Markdown 的流式动画。
 
 
-### 阶段 3：功能对齐（长尾）
-头像与图片消息（base64 解码 + Makepad 的 `Image`）、重新生成、清空记录（二次确认）、
-模型切换面板与「视觉理解」标注、设置（API Key / 接口地址）、本地持久化、主题、Toast、欢迎语、打字速度……
+### 阶段 3：功能对齐（进行中）
+- ✅ 图片消息（base64 → 多模态请求 → 气泡里显示原图）：见 §10
+- 待做：重新生成、清空记录（二次确认）、模型切换面板与「视觉理解」标注、
+  设置（API Key / 接口地址）、本地持久化、头像、主题、Toast、打字速度
 
 ### 阶段 4：全平台出包
 Android 已有完整流程（见 §4）；Windows 桌面打包**待核实**（官方无工具，社区 `cargo-packager`）；
@@ -322,5 +323,52 @@ Makepad 侧用 `default-features = false` 引入。
 - **流中途的错误事件被静默忽略**：若上游在流里塞 `data: {"error":...}`，`parse_sse_line`
   返回 `Ignore`。**网页版 / egui / Tauri 三个实现都一样**，不是这次引入的，但确实是缺口。
 - **没有重试**（与现有实现一致）。
-- **模型写死为 `DEFAULT_MODEL`**；图片消息、重新生成、清空记录、设置与持久化都还没做（阶段 3）。
+- **模型写死为 `DEFAULT_MODEL`**；重新生成、清空记录、模型切换、设置与持久化还没做（图片消息已完成，见 §10）。
 - `Limits` 调到了 `total_timeout = 600s` / `max_body_bytes = 8MB`（默认 60s / 1MB 对长回复太紧）。
+
+## 10. 阶段 3 之一：图片消息（2026-10-16，已实装）
+
+### 10.1 通路
+
+```
+点「＋图」→ FileDialog（平台 native，异步）→ FileSelected { paths }
+        → std::fs::read → 体积检查 → base64 成 data URL → 进待发槽位
+        → 回车/点发送 → Message.image_url = data URL
+        → decem-core::format_messages 按模型是否支持视觉拼成多模态数组
+        → 用户气泡里用 ImageRef::load_image_from_data 显示原图
+```
+
+代码：`decem-makepad/src/main.rs` 的 `pick_image` / `handle_file_dialog` / `accept_image` /
+`read_image` / `mime_for` / `to_data_url`，以及 `User` 模板里的 `photo := Image{...}`。
+
+**实测**：发一张插画给模型，它准确描述了画面内容（抱着的虾片包装、额头的红色圆圈、爪子上的红色印子）
+——说明图**真的发出去了**且模型**真的看到了**。截图在探针目录 `12-阶段3-图片消息-模型看到了.png`。
+
+### 10.2 两个坑（都踩过，别再踩）
+
+**① 别把 `Image` 放进输入行。**
+把预览图作为输入行（`View{flow: Right}`）的一个子部件时，**`glass.TextInput` 会拿不到键盘焦点**：
+点上去没有聚焦环、打字不进去，但整个 App 是活的（点按钮能开对话框）。
+从截图能看出线索——输入框的描边从行的最左边开始、盖住了左边的按钮，说明 `Image` 的
+`Fit` 宽度把这一行的布局搅乱了，输入框的**命中区**和画出来的框对不上。
+移出到单独一行（根 `View{flow: Down}` 里、输入行上方）就恢复正常。
+
+**② `FileDialog::want_bytes(true)` 这条路外部用不了。**
+它回给应用的是 `FileDialogLoadAction`，而那个类型是 `platform` 的 `pub(crate)`
+（`platform/src/file_dialogs.rs:317`），外部 crate 命名不到；全仓库 `apps/`+`examples/`
+也**没有任何消费它的示例**（`grep want_bytes` 零命中）。
+所以走公开的 `FileDialog` + `FileSelected { paths }` 拿路径，字节自己 `std::fs::read`。
+
+### 10.3 已有的取舍与缺口
+
+- 单张图上限 8 MB（服务端把请求体放宽到 20MB）；`Limits.max_body_bytes` 也调到 8MB。
+- 气泡里的图 `max_height: 320`（逻辑像素）、`ImageFit.Smallest`（**不裁不拉伸**，
+  整张可见）；所以特别竖长的图两侧会留白。点开看大图还没做。
+- **图片只在气泡部件新建时解码一次**（用 `item_with_existed` 的第二个返回值判断）。
+  `ImageRef::load_image_from_data` 每次都真解码，而这条路径每帧都会跑到；
+  另外 `ImageRef::set_texture` 在 draw 事件里**会主动请求重绘**（`image.rs:1816-1818`），
+  无条件每帧调就是持续重绘。
+- `ImageAttachment.data_url` 与原始字节都留在 `Msg` 里（历史最多 10 条），没做清理。
+- **`DECEM_IMAGE=<路径>` 启动钩子**：把一张图直接放进待发槽位，用来在**系统文件对话框
+  无法被自动化驱动**（模态窗口，焦点会被 CU 覆盖层截走）的情况下验后半条链。
+  与 `DECEM_STRESS` 同性质，不是给用户用的开关。

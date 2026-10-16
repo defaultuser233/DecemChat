@@ -9,6 +9,7 @@ edition = "2021"
 
 [dependencies]
 decem-core = { version = "0.1.0", path = "../crates/decem-core", default-features = false }
+makepad-base64 = { git = "https://github.com/makepad/makepad", branch = "dev", version = "1.0.0" }
 # 只开需要的 family：rich_text（含 Markdown）、glass（输入框与按钮的样式）
 makepad-widgets = { git = "https://github.com/makepad/makepad", branch = "dev", default-features = false, features = ["rich_text", "glass"] }
 serde_json = "1.0.154"

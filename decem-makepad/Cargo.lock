@@ -118,6 +118,7 @@ name = "decem-makepad"
 version = "0.1.0"
 dependencies = [
  "decem-core",
+ "makepad-base64",
  "makepad-widgets",
  "serde_json",
 ]
@@ -214,6 +215,11 @@ source = "git+https://github.com/makepad/makepad?branch=dev#71c9ddcbb9c01dd208f9
 dependencies = [
  "makepad-objc-sys",
 ]
+
+[[package]]
+name = "makepad-base64"
+version = "1.0.0"
+source = "git+https://github.com/makepad/makepad?branch=dev#71c9ddcbb9c01dd208f99621fdd71024a5d35c65"
 
 [[package]]
 name = "makepad-byteorder-lite"

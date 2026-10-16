@@ -11,6 +11,7 @@
 pub use makepad_widgets;
 
 use makepad_widgets::desktop_style::{self, DesktopStyle, StyleSheet};
+use makepad_widgets::makepad_platform::file_dialogs::{FileDialog, FileDialogAction};
 use makepad_widgets::makepad_platform::makepad_network::blocking_http::{
     self, CancelToken, Limits, Request,
 };
@@ -20,8 +21,10 @@ use makepad_widgets::*;
 use decem_core::{
     parse_sse_line, ChatRequest, Message, MessageRole, SseDecoder, SseOutcome, DEFAULT_MODEL,
 };
+use makepad_base64::{base64_encode, BASE64_STANDARD};
 
-use std::sync::{mpsc, RwLock};
+use std::path::Path;
+use std::sync::{mpsc, Arc, RwLock};
 use std::time::Duration;
 
 app_main!(App);
@@ -33,9 +36,20 @@ enum Role {
     Char,
 }
 
+/// 一张选好、准备随消息发出去的图。
+///
+/// 字节留着给界面显示（Makepad 自带 PNG/JPEG/WebP/GIF/BMP 解码，不需要 `image` crate），
+/// data URL 留着发请求——两者都在选图那一刻算一次，之后不再碰。
+struct ImageAttachment {
+    bytes: Arc<[u8]>,
+    /// `data:image/png;base64,...`，直接进 `messages[i].content` 的多模态数组
+    data_url: String,
+}
+
 struct Msg {
     role: Role,
     text: String,
+    image: Option<ImageAttachment>,
 }
 
 /// 全局聊天状态（照 aichat 的做法：`ChatList` 要在 `draw_walk` 里读它）。
@@ -54,7 +68,7 @@ static CHAT: RwLock<Chat> = RwLock::new(Chat {
 const WELCOME: &str = "🦊 狐狸来啦～ (≧▽≦)/～ ❤️ 你终于来找我玩啦！嗷呜～";
 
 /// 往聊天里追一条 char 消息，并把流式状态收干净。
-/// 阶段 2 用它呈现错误（阶段 3 再决定要不要单独的错误样式）。
+/// 现阶段用它呈现错误（之后要不要单独的错误样式再定）。
 fn push_message(text: String) {
     let mut chat = CHAT.write().unwrap();
     chat.streaming.clear();
@@ -62,7 +76,35 @@ fn push_message(text: String) {
     chat.messages.push(Msg {
         role: Role::Char,
         text,
+        image: None,
     });
+}
+
+/// 单张图的上限。服务端把请求体放宽到 20MB，这里留足余量。
+const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+
+/// 按扩展名给 MIME。Makepad 解码靠魔数（不看你给的 MIME），这个 MIME 只进 data URL 给上游看。
+fn mime_for(path: &Path) -> String {
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        _ => "image/jpeg",
+    }
+    .to_owned()
+}
+
+/// 图片按 data URL 内嵌进请求体（服务端为此把体积上限放宽到 20MB）。
+fn to_data_url(mime: &str, bytes: &[u8]) -> String {
+    let encoded = base64_encode(bytes, &BASE64_STANDARD);
+    // base64 的输出一定是 ASCII，转换不会失败
+    format!("data:{mime};base64,{}", String::from_utf8_lossy(&encoded))
 }
 
 /// 后端地址。API Key 在服务器侧，客户端不带任何鉴权头。
@@ -250,10 +292,15 @@ impl Worker {
 /// 绘制是同一线程、逐项同步进行的，所以一个「当前项」槽位就够。
 static BUBBLE_BODY: RwLock<Option<(String, bool)>> = RwLock::new(None);
 
-/// 正文里有没有块级元素。代码块和表格的宽度不由正文字号决定，量文字没有意义，
-/// 这类消息直接用满宽。
+/// 正文里有没有块级元素。代码块和表格的宽度不由正文字号决定，量文字没有意义。
 fn has_block_content(text: &str) -> bool {
     text.contains("```") || text.contains("\n|")
+}
+
+/// 这条消息要不要用满宽。
+/// 带图的要有地方放图；带代码块/表格的量文字没意义。其余按量出来的文字宽度收窄。
+fn wants_full_width(msg: &Msg) -> bool {
+    msg.image.is_some() || has_block_content(&msg.text)
 }
 
 /// 量宽容器：先按上限把正文量一遍，再用**量出来的实际宽度**给气泡定宽，
@@ -389,14 +436,27 @@ impl Widget for ChatList {
                             Role::User => id!(User),
                             Role::Char => id!(Char),
                         };
-                        let item_widget = list.item(cx, item_id, template);
+                        let (item_widget, existed) = list.item_with_existed(cx, item_id, template);
                         let mut markdown = item_widget.markdown(cx, ids!(selectable));
                         markdown.set_text(cx, &msg.text);
                         if was_animating {
                             markdown.stop_streaming_animation();
                         }
+                        // 图片只在部件**新建**时解一次。`load_image_from_data` 每次都真解码，
+                        // 而这条路径每帧都会跑到，无条件调就是每帧重解码。`existed` 帮我们
+                        // 分清「新建」和「复用」；部件被回收后再滚回来会重建，于是自然重解一次。
+                        if !existed && msg.role == Role::User {
+                            let photo = item_widget.image(cx, ids!(photo));
+                            match &msg.image {
+                                // 选图那一刻已经解成功过一次，这里再失败就只是不显示
+                                Some(attachment) => {
+                                    let _ = photo.load_image_from_data(cx, &attachment.bytes);
+                                }
+                                None => photo.set_texture(cx, None),
+                            }
+                        }
                         *BUBBLE_BODY.write().unwrap() =
-                            Some((msg.text.clone(), has_block_content(&msg.text)));
+                            Some((msg.text.clone(), wants_full_width(msg)));
                         item_widget.draw_all_unscoped(cx);
                         *BUBBLE_BODY.write().unwrap() = None;
                         if was_animating && markdown.is_streaming_animation_done() {
@@ -418,16 +478,116 @@ pub struct App {
     ui: WidgetRef,
     #[rust]
     worker: Option<Worker>,
+    /// 选好但还没随消息发出去的图（预览在输入框左边那个小图上）。
+    #[rust]
+    pending_image: Option<ImageAttachment>,
+    /// `DECEM_IMAGE` 启动钩子只查一次环境变量。
+    #[rust]
+    startup_image_checked: bool,
 }
 
+/// 文件对话框的 id，用来认出哪个对话框回了话。
+const PICK_IMAGE: LiveId = live_id!(pick_image);
+
 impl App {
+    /// 弹系统文件对话框挑一张图。结果走平台动作异步回来（见 `handle_file_dialog`）。
+    /// `want_bytes(true)` 让平台在 worker 线程把字节读好，省得自己碰文件系统。
+    fn pick_image(&mut self, cx: &mut Cx) {
+        let extensions: Vec<String> = ["png", "jpg", "jpeg", "gif", "webp", "bmp"]
+            .iter()
+            .map(|ext| (*ext).to_owned())
+            .collect();
+        let dialog = FileDialog::new()
+            .set_id(PICK_IMAGE)
+            .set_title("选一张图".to_owned())
+            .add_filter("图片".to_owned(), extensions);
+        cx.open_select_file_dialog(dialog);
+    }
+
+    /// 文件对话框的结果是平台动作，不走 widget action，所以单独接。
+    ///
+    /// 用 `want_bytes(false)`（默认）拿路径、自己读字节：平台那条 `want_bytes` 通路
+    /// 回给应用的是一个 `pub(crate)` 的包装动作（`FileDialogLoadAction`），
+    /// 外部命名不到，全仓库也没有消费它的示例。
+    fn handle_file_dialog(&mut self, cx: &mut Cx, actions: &Actions) {
+        for action in actions {
+            let Some(FileDialogAction::FileSelected { id, paths }) =
+                action.downcast_ref::<FileDialogAction>()
+            else {
+                continue;
+            };
+            if *id != PICK_IMAGE {
+                continue;
+            }
+            if let Some(path) = paths.first() {
+                self.accept_image(cx, path);
+            }
+            break;
+        }
+    }
+
+    /// 把一张图读进来放进待发槽位（解码 + 算 data URL + 更新预览）。
+    /// 文件对话框与 `DECEM_IMAGE` 启动钩子都走这里。
+    fn accept_image(&mut self, cx: &mut Cx, path: &Path) {
+        let attachment = match Self::read_image(path) {
+            Ok(attachment) => attachment,
+            Err(reason) => {
+                push_message(format!("⚠️ {reason}"));
+                return;
+            }
+        };
+        // 先解码显示，成功才算真的收下了
+        let photo = self.ui.image(cx, ids!(pending_photo));
+        if let Err(err) = photo.load_image_from_data(cx, &attachment.bytes) {
+            push_message(format!("⚠️ 这张图读不出来：{err}"));
+            return;
+        }
+        self.pending_image = Some(attachment);
+        cx.redraw_all();
+    }
+
+    /// 读文件字节并算好 data URL，顺带做个体积上限。
+    /// 失败返回**给用户看的原因**，不要把错误吃掉。
+    fn read_image(path: &Path) -> Result<ImageAttachment, String> {
+        let bytes = std::fs::read(path).map_err(|err| format!("读不了这个文件：{err}"))?;
+        if bytes.len() > MAX_IMAGE_BYTES {
+            return Err(format!(
+                "图片太大（{:.1} MB），上限 {} MB",
+                bytes.len() as f64 / 1_048_576.0,
+                MAX_IMAGE_BYTES / 1_048_576
+            ));
+        }
+        let bytes: Arc<[u8]> = Arc::from(bytes);
+        Ok(ImageAttachment {
+            data_url: to_data_url(&mime_for(path), &bytes),
+            bytes,
+        })
+    }
+
+    /// 一次性启动钩子：`DECEM_IMAGE=<路径>` 时把这张图直接放进待发槽位。
+    ///
+    /// 存在的理由与 `DECEM_STRESS` 一样：系统文件对话框是**模态**窗口，
+    /// 自动化脚本驱动不了它（焦点会被 CU 覆盖层截走），
+    /// 有了这个钩子，「解码 → 预览 → 发送 → 多模态请求」这半条链就能单独验。
+    fn load_startup_image(&mut self, cx: &mut Cx) {
+        if self.startup_image_checked {
+            return;
+        }
+        self.startup_image_checked = true;
+        if let Ok(path) = std::env::var("DECEM_IMAGE") {
+            self.accept_image(cx, Path::new(&path));
+        }
+    }
+
     fn send(&mut self, cx: &mut Cx) {
         let input = self.ui.text_input(cx, ids!(input));
         let text = input.text().trim().to_owned();
-        if text.is_empty() {
+        // 只有图片、没有文字也可以发（`decem-core` 会用默认图片提示补上文字）
+        if text.is_empty() && self.pending_image.is_none() {
             return;
         }
         input.set_text(cx, "");
+        let image = self.pending_image.take();
 
         // 组请求体与拿列表长度都在同一把锁里做完，避免中途被 UI 线程插队
         let (payload, items_len) = {
@@ -435,11 +595,13 @@ impl App {
             chat.messages.push(Msg {
                 role: Role::User,
                 text,
+                image,
             });
             chat.streaming.clear();
             chat.is_streaming = true;
 
-            // system 提示词 + 最近 10 条由 `ChatRequest::new` 负责编排
+            // system 提示词 + 最近 10 条由 `ChatRequest::new` 负责编排；
+            // 图片在 `format_messages` 里按模型是否支持视觉决定拼成多模态数组还是降级成文字
             let history: Vec<Message> = chat
                 .messages
                 .iter()
@@ -449,7 +611,9 @@ impl App {
                         Role::User => MessageRole::User,
                         Role::Char => MessageRole::Assistant,
                     };
-                    Message::text(index.to_string(), role, msg.text.as_str(), 0)
+                    let mut message = Message::text(index.to_string(), role, msg.text.as_str(), 0);
+                    message.image_url = msg.image.as_ref().map(|image| image.data_url.clone());
+                    message
                 })
                 .collect();
             let request = ChatRequest::new(MODEL, &history);
@@ -457,6 +621,9 @@ impl App {
                 .map_err(|err| format!("请求体序列化失败：{err}"));
             (payload, chat.messages.len() + 1)
         };
+
+        // 预览图跟着清掉
+        self.ui.image(cx, ids!(pending_photo)).set_texture(cx, None);
 
         match payload {
             Ok(body) => self.worker = Some(Worker::spawn_chat(body)),
@@ -492,6 +659,7 @@ impl App {
             chat.messages.push(Msg {
                 role: Role::Char,
                 text,
+                image: None,
             });
         }
         chat.is_streaming = false;
@@ -531,6 +699,13 @@ impl App {
 
 impl MatchEvent for App {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        if self
+            .ui
+            .glass_button(cx, ids!(attach_button))
+            .clicked(actions)
+        {
+            self.pick_image(cx);
+        }
         if self.ui.glass_button(cx, ids!(send_button)).clicked(actions) {
             self.send(cx);
         }
@@ -561,6 +736,7 @@ impl AppMain for App {
         chat.messages.push(Msg {
             role: Role::Char,
             text: WELCOME.to_owned(),
+            image: None,
         });
         // 压测：DECEM_STRESS=1 时塞几百条，观察长列表滚动
         if std::env::var("DECEM_STRESS").is_ok() {
@@ -571,6 +747,7 @@ impl AppMain for App {
                     text: format!(
                         "压测第 {i} 条：中文、全角标点？！～、emoji 🦊，以及一段用来观察换行的稍长文本。"
                     ),
+                    image: None,
                 });
             }
         }
@@ -579,7 +756,11 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        self.load_startup_image(cx);
         self.match_event(cx, event);
+        if let Event::Actions(actions) = event {
+            self.handle_file_dialog(cx, actions);
+        }
         self.ui.handle_event(cx, event, &mut Scope::empty());
         self.poll_worker(cx);
     }
@@ -663,10 +844,20 @@ script_mod! {
                     RoundedView {
                         width: Fill
                         height: Fit
+                        flow: Down
                         show_bg: true
                         draw_bg.color: #xE95620
                         draw_bg.border_radius: uniform(16.)
                         padding: Inset{left: 14 top: 10 right: 14 bottom: 10}
+
+                        // 用户发的图。居中显示，没有纹理时高度收成 0、不占位
+                        photo := Image {
+                            width: Fit
+                            height: Fit
+                            max_height: FitBound.Abs(320)
+                            fit: ImageFit.Smallest
+                            align: Align{x: 0.5}
+                        }
 
                         selectable := Markdown {
                             width: Fill
@@ -696,12 +887,26 @@ script_mod! {
 
                         chat_list := ChatList {}
 
+                        // 待发图片的预览。没有图片时没有纹理，高度收成 0、不占位
+                        pending_photo := Image {
+                            width: Fit
+                            height: Fit
+                            max_height: FitBound.Abs(120)
+                            fit: ImageFit.Smallest
+                        }
+
                         View{
                             width: Fill
                             height: Fit
                             flow: Right
                             spacing: 8.
                             align: Align{y: 1.0}
+
+                            attach_button := glass.GlassButtonProminent {
+                                text: "＋图"
+                                width: 72
+                                height: 44
+                            }
 
                             input := glass.TextInput {
                                 width: Fill
