@@ -1,6 +1,9 @@
 [workspace]
 resolver = "3"
 members = ["crates/*", "src-tauri"]
+# Makepad 版是独立 crate（自带 workspace 与几十个 vendored 依赖）：不并进主仓库，
+# 免得 cargo clippy --workspace 把它拖进来
+exclude = ["decem-makepad"]
 
 [workspace.package]
 version = "2.42.0"
