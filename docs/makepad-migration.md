@@ -526,3 +526,43 @@ extern "system" {
 
 另外：Makepad 的十六进制颜色是 **RRGGBBAA**（不是 AARRGGBB）。写成
 `#x4DF38181` 会得到一条绿描边，30% 珊瑚要写 `#xF381814D`。
+
+## 16. 设置抽屉与模型切换（2026-10-17，已实装）
+
+右侧设置抽屉 + 「切换模型」已落地（头像上传、深浅色模式留给下轮）。
+抽屉外壳用 `Modal`：它 `on_after_apply` 把上报的 Walk 钉成 `empty`（`widgets/core/src/modal.rs:215-244`），
+放 body 里当兄弟节点不占布局。贴右的做法是给实例覆盖根布局
+`align: Align{x: 1.0, y: 0.0}`（Overlay 流的 align 见 `draw/src/turtle.rs:4908-4920`），
+`content` 固定 320 宽、高度 `Fill`；点在 content 矩形外的遮罩仍会关闭
+（`modal.rs:307-315` 只把「落在 content 外」当作 dismiss），所以不用自己写遮罩逻辑。
+
+模型列表**没有用 `DropDown`**：它一行只有一段文字，做不出「名字 + 薄荷徽章 + 描述」
+两行结构，也没法把对勾固定成灰色。改用 `ModelList`（自定义容器）+ `PortalList` +
+自定义行 `ModelRow`，名字/描述/徽章全部来自 `decem_core::AVAILABLE_MODELS`，
+UI 不另存一份。选中态由 `static MODEL_ID: RwLock<&'static str>` 驱动，
+`build_request_body()` 每次请求时读取，所以下一条消息（含重新生成）立刻用新模型。
+
+这次现踩的坑：
+
+1. **`#[derive(Widget)]` 只生成 `WidgetNode`，不生成 `Widget::handle_event`**
+   （trait 默认实现是空的，`widgets/core/src/widget.rs:302`）。自定义容器必须在
+   `impl Widget` 里手写 `handle_event` 并转发给 `#[deref] view`，否则内层
+   `PortalList` 收不到任何鼠标事件，行永远点不中。既有的「列表内重新生成按钮
+   无响应」很可能也是这个根因（`ChatList` 同样没有转发）；本次按约定没有去改它。
+2. **`visible: false` 仍然占布局。** 收起模型列表不能只 `set_visible(false)`，
+   还要把高度压成 0：`widget.as_view().set_walk(cx, Walk{ height: Size::Fixed(0.0), .. })`
+   （`ViewRef::set_walk`，`widgets/core/src/view.rs:361-369`）。否则会空出 320px。
+3. **字体缺字只在运行期报。** Makepad 自带字体集缺 `U+25BE`（▾）与 `U+2715`（✕），
+   日志是 `font miss U+25BE ...`，界面上是豆腐块，`cargo check` 完全看不见。
+   折叠箭头改用 `▼`（U+25BC），关闭改用 `×`（U+00D7）即可。
+4. **`items_with_actions` 会按“每条 action”返回 item。** 同一批 actions 里既有
+   hover 的 `ViewAction`、又有行自己发的 click action，两者都带同一个 item uid，
+   同一个 item 会被返回两次；直接在里面调 `select_model` 会执行两遍。
+   先收集、最后只处理一次。
+5. 行的 hover/click 直接读原始 `Event::MouseMove` / `Event::MouseUp` +
+   `event.hits(cx, self.view.area())`，不要指望自定义部件根 View 的 `cursor`
+   一定把 `ViewAction` 送出来。
+6. 颜色仍是 RRGGBBAA：薄荷 20% 是 `#x95E1D333`，玻璃底是 `#x1a1a1acc`。
+
+与规格的差异：无滑出动画（静态贴右）、无 backdrop blur（Makepad 没有）、
+图标用文字字形（▼ / × / ⇄ / 👁）、头像与深浅色两段只有标题占位。

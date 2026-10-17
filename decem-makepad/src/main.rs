@@ -19,7 +19,8 @@ use makepad_widgets::makepad_platform::thread::SignalToUI;
 use makepad_widgets::*;
 
 use decem_core::{
-    parse_sse_line, ChatRequest, Message, MessageRole, SseDecoder, SseOutcome, DEFAULT_MODEL,
+    is_vision_model, model_display_name, parse_sse_line, ChatRequest, Message, MessageRole,
+    SseDecoder, SseOutcome, AVAILABLE_MODELS, DEFAULT_MODEL,
 };
 use makepad_base64::{base64_encode, BASE64_STANDARD};
 
@@ -178,8 +179,14 @@ fn to_data_url(mime: &str, bytes: &[u8]) -> String {
 /// 与 `crates/decem-core`（`provider::API_URL`）及 `crates/decem-app` 的值保持一致。
 const API_URL: &str = "https://api.valedecem.top:8443/api/chat";
 
-/// 默认模型。模型表与能力查询都在 `decem_core::models` 里，阶段 3 再做切换面板。
-const MODEL: &str = DEFAULT_MODEL;
+/// 当前选中的模型 ID。模型表、展示名与视觉能力判断都取 `decem_core::models`，
+/// 这里只存一个 ID，切换后 `build_request_body` 立刻读到新值。
+static MODEL_ID: RwLock<&'static str> = RwLock::new(DEFAULT_MODEL);
+
+fn current_model_id() -> &'static str {
+    // poisoned 说明另一个线程在持锁时 panic；这里的值仍是完整可读的
+    *MODEL_ID.read().unwrap()
+}
 
 /// 把消息历史拼成上游请求体。`send` 与 `regenerate` 共用，
 /// 保证「重发同一条用户消息」与「发新消息」走完全相同的编排。
@@ -200,7 +207,7 @@ fn build_request_body(messages: &[Msg]) -> Result<Vec<u8>, String> {
             message
         })
         .collect();
-    let request = ChatRequest::new(MODEL, &history);
+    let request = ChatRequest::new(current_model_id(), &history);
     serde_json::to_vec(&request.to_upstream()).map_err(|err| format!("请求体序列化失败：{err}"))
 }
 
@@ -591,6 +598,134 @@ impl Widget for ChatList {
     }
 }
 
+// ---------------------------------------------------------------- 设置抽屉
+
+/// 设置抽屉里的一行模型（规格 §6）。
+///
+/// 没有用 Makepad 的 `DropDown`：它一行只有一段文字，做不出「名字 + 薄荷徽章 +
+/// 描述」的两行结构，也管不了对勾固定灰色。这里由 `ModelList` 逐项喂文字，
+/// 行自己负责悬停/选中的底色与文字反色。
+#[derive(Script, ScriptHook, Widget)]
+pub struct ModelRow {
+    #[deref]
+    view: View,
+    /// 在 `AVAILABLE_MODELS` 里的下标，由 `ModelList` 画之前写入。
+    #[rust]
+    index: usize,
+    #[rust]
+    hovered: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum ModelRowAction {
+    #[default]
+    None,
+    Clicked,
+}
+
+/// 模型列表容器：包一层 PortalList，按 `AVAILABLE_MODELS` 逐项写入文字与徽章。
+/// 与 `ChatList` 同一个路子（列表项内容只能在 Rust 侧按数据写）。
+#[derive(Script, ScriptHook, Widget)]
+pub struct ModelList {
+    #[deref]
+    view: View,
+}
+
+impl Widget for ModelRow {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        let selected = AVAILABLE_MODELS
+            .get(self.index)
+            .is_some_and(|model| model.id == current_model_id());
+        let active = selected || self.hovered;
+        // 选中/悬停：accent 底 + 黑字；其余白字 / 灰描述（规格 §6）
+        let ink = if active {
+            vec4(0.0, 0.0, 0.0, 1.0)
+        } else {
+            vec4(1.0, 1.0, 1.0, 1.0)
+        };
+        let sub_ink = if active {
+            ink
+        } else {
+            vec4(0.70, 0.70, 0.70, 1.0)
+        };
+
+        self.view.widget(cx, ids!(row_hl)).set_visible(cx, active);
+        self.view
+            .label(cx, ids!(model_name))
+            .set_text_color(cx, ink);
+        self.view
+            .label(cx, ids!(model_desc))
+            .set_text_color(cx, sub_ink);
+        // 对勾颜色在脚本里固定 #B3B3B3，不随高亮变黑（规格 §6）
+        self.view.widget(cx, ids!(check)).set_visible(cx, selected);
+
+        self.view.draw_walk(cx, scope, walk)
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        // 直接读原始鼠标事件，不依赖 View 的交互开关：
+        // 自定义部件的根 View 即使写了 cursor，也不保证拿到 hover/click 动作。
+        if matches!(event, Event::MouseMove(_)) {
+            match event.hits(cx, self.view.area()) {
+                Hit::FingerHoverIn(_) | Hit::FingerHoverOver(_) if !self.hovered => {
+                    self.hovered = true;
+                    cx.redraw_all();
+                }
+                Hit::FingerHoverOut(_) if self.hovered => {
+                    self.hovered = false;
+                    cx.redraw_all();
+                }
+                _ => {}
+            }
+        }
+        if matches!(event, Event::MouseUp(_)) {
+            if let Hit::FingerUp(up) = event.hits(cx, self.view.area()) {
+                if up.was_tap() {
+                    cx.widget_action(self.widget_uid(), ModelRowAction::Clicked);
+                }
+            }
+        }
+        self.view.handle_event(cx, event, scope);
+    }
+}
+
+impl Widget for ModelList {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        // 必须手动转发：`#[derive(Widget)]` 只生成 WidgetNode，不生成
+        // `Widget::handle_event`（它的默认实现是空的）。不转的话内层
+        // PortalList 收不到任何鼠标事件，行就永远点不中。
+        self.view.handle_event(cx, event, scope);
+    }
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
+            if let Some(mut list) = item.as_portal_list().borrow_mut() {
+                list.set_item_range(cx, 0, AVAILABLE_MODELS.len());
+                while let Some(item_id) = list.next_visible_item(cx) {
+                    let Some(model) = AVAILABLE_MODELS.get(item_id) else {
+                        continue;
+                    };
+                    let (item_widget, _existed) = list.item_with_existed(cx, item_id, id!(Row));
+                    item_widget
+                        .label(cx, ids!(model_name))
+                        .set_text(cx, model.name);
+                    item_widget
+                        .label(cx, ids!(model_desc))
+                        .set_text(cx, model.description);
+                    item_widget
+                        .widget(cx, ids!(vision_badge))
+                        .set_visible(cx, model.supports_vision);
+                    if let Some(mut row) = item_widget.as_model_row().borrow_mut() {
+                        row.index = item_id;
+                    }
+                    item_widget.draw_all_unscoped(cx);
+                }
+            }
+        }
+        DrawStep::done()
+    }
+}
+
 // ---------------------------------------------------------------- 应用
 
 #[derive(Script, ScriptHook)]
@@ -611,6 +746,12 @@ pub struct App {
     /// 发送键的禁用态只在首帧同步一次（之后跟着动作批同步）。
     #[rust]
     send_state_synced: bool,
+    /// 设置抽屉里的模型列表是否展开。抽屉每次打开时先收起。
+    #[rust]
+    models_open: bool,
+    /// 抽屉里的文字首帧同步一次（部件树建好之前拿不到 Label）。
+    #[rust]
+    drawer_synced: bool,
 }
 
 /// 文件对话框的 id，用来认出哪个对话框回了话。
@@ -752,6 +893,51 @@ impl App {
         self.ui
             .widget(cx, ids!(send_button))
             .set_disabled(cx, !enabled);
+    }
+
+    /// 抽屉里与当前模型有关的三处文字/徽章：触发器、列表选中行、底部「当前: X」。
+    /// 列表选中行由 `ModelList` 每帧按 `MODEL_ID` 重画，这里只同步常驻部件。
+    fn sync_model_ui(&self, cx: &mut Cx) {
+        let model = current_model_id();
+        let name = model_display_name(model);
+        self.ui
+            .label(cx, ids!(model_trigger_label))
+            .set_text(cx, &name);
+        self.ui
+            .label(cx, ids!(model_current_label))
+            .set_text(cx, &format!("当前: {name}"));
+        self.ui
+            .widget(cx, ids!(current_badge))
+            .set_visible(cx, is_vision_model(model));
+        cx.redraw_all();
+    }
+
+    /// 展开/收起模型列表。收起时同时把高度压成 0：
+    /// Makepad 的 `visible: false` 仍会在布局里留坑，只隐藏会空出一大块。
+    fn set_models_open(&self, cx: &mut Cx, open: bool) {
+        let list_box = self.ui.widget(cx, ids!(model_list_box));
+        list_box.set_visible(cx, open);
+        list_box.as_view().set_walk(
+            cx,
+            Walk {
+                width: Size::fill(),
+                height: if open { Size::fit() } else { Size::Fixed(0.0) },
+                ..Walk::default()
+            },
+        );
+        cx.redraw_all();
+    }
+
+    /// 选中第 `index` 个模型：只记 ID，下一条消息（含重新生成）由
+    /// `build_request_body` 读取。
+    fn select_model(&mut self, cx: &mut Cx, index: usize) {
+        let Some(model) = AVAILABLE_MODELS.get(index) else {
+            return;
+        };
+        *MODEL_ID.write().unwrap() = model.id;
+        self.models_open = false;
+        self.set_models_open(cx, false);
+        self.sync_model_ui(cx);
     }
 
     fn send(&mut self, cx: &mut Cx) {
@@ -949,6 +1135,44 @@ impl MatchEvent for App {
         {
             self.ui.modal(cx, ids!(clear_confirm)).close(cx);
         }
+        // 设置抽屉：齿轮开、头部 ✕ 关（点遮罩 / Esc 由 Modal 自己关）。
+        if self.ui.button(cx, ids!(settings_button)).clicked(actions) {
+            self.models_open = false;
+            self.set_models_open(cx, false);
+            self.sync_model_ui(cx);
+            self.ui.modal(cx, ids!(settings_drawer)).open(cx);
+        }
+        if self
+            .ui
+            .button(cx, ids!(drawer_close_button))
+            .clicked(actions)
+        {
+            self.ui.modal(cx, ids!(settings_drawer)).close(cx);
+        }
+        if self
+            .ui
+            .button(cx, ids!(model_trigger_button))
+            .clicked(actions)
+        {
+            self.models_open = !self.models_open;
+            self.set_models_open(cx, self.models_open);
+        }
+        // 模型行是 PortalList 里的自定义行，动作带 item uid，
+        // 用 item_id 直接下标 `AVAILABLE_MODELS`（与列表填充同序）。
+        let model_rows = self.ui.portal_list(cx, ids!(model_rows));
+        let mut picked = None;
+        for (item_id, item) in model_rows.items_with_actions(actions) {
+            if actions.find_widget_action_cast::<ModelRowAction>(item.widget_uid())
+                == ModelRowAction::Clicked
+            {
+                picked = Some(item_id);
+            }
+        }
+        // 同一批 actions 里可能同时带 hover 与 click 两条，`items_with_actions`
+        // 会把同一个 item 返回多次；只认最后一次，避免重复 select。
+        if let Some(item_id) = picked {
+            self.select_model(cx, item_id);
+        }
         // 最后一条 char 气泡底部的「重新生成」。逐项动作照 aichat 示例的
         // 逐项删除：动作带着所在 item 的 uid，这里按 item 找回按钮。
         // regenerate 内部还有流式守门与最后一条用户消息的重查，
@@ -1042,6 +1266,11 @@ impl AppMain for App {
                     .set_visible(cx, false);
             }
             self.sync_send_enabled(cx);
+        }
+        // 抽屉里的当前模型文字：部件树建好后的第一帧同步一次。
+        if !self.drawer_synced && !self.ui.widget(cx, ids!(model_trigger_label)).is_empty() {
+            self.drawer_synced = true;
+            self.sync_model_ui(cx);
         }
         self.poll_worker(cx);
     }
@@ -1272,6 +1501,141 @@ script_mod! {
                     }
                 }
             }
+        }
+    }
+
+    // 设置抽屉里的模型行（规格 §6）。列表由 ModelList 逐项驱动，
+    // 名字/描述/徽章都来自 decem_core::AVAILABLE_MODELS，UI 不另存一份。
+    let ModelRow = #(ModelRow::register_widget(vm)) {
+        width: Fill
+        height: 64
+        flow: Overlay
+        align: Align{x: 0.0, y: 0.0}
+        // 让行根 View 参与命中并上报 hover/click；Makepad 的 View 只有
+        // 设置了 cursor 或 animator 才会走自己的命中分支（view.rs:1350）。
+        cursor: MouseCursor.Hand
+
+        // 选中/悬停底色单独一层：裸 View 的 draw_bg 没有 color，
+        // RoundedView 的实例色又没有 Rust 侧 setter，显隐切换最省事。
+        row_hl := RoundedView {
+            width: Fill
+            height: Fill
+            visible: false
+            show_bg: true
+            draw_bg.color: #x8FD4E5
+            draw_bg.border_radius: uniform(8.)
+        }
+
+        View {
+            width: Fill
+            height: Fill
+            flow: Down
+            spacing: 2.
+            padding: Inset{left: 8 top: 8 right: 8 bottom: 8}
+
+            // 上行：模型名 +（支持视觉时）薄荷徽章
+            View {
+                width: Fill
+                height: Fit
+                flow: Right
+                spacing: 6.
+                align: Align{y: 0.5}
+
+                model_name := Label {
+                    width: Fit
+                    height: Fit
+                    padding: 0
+                    text: ""
+                    draw_text +: {
+                        color: #xffffffff
+                        text_style: theme.font_regular{font_size: 14}
+                    }
+                }
+
+                vision_badge := RoundedView {
+                    width: Fit
+                    height: Fit
+                    flow: Right
+                    spacing: 3.
+                    align: Align{y: 0.5}
+                    padding: Inset{left: 6 top: 2 right: 6 bottom: 2}
+                    show_bg: true
+                    // rgba(149,225,211,0.2)
+                    draw_bg.color: #x95E1D333
+                    draw_bg.border_radius: uniform(99.)
+
+                    Label {
+                        width: Fit
+                        height: Fit
+                        padding: 0
+                        text: "👁"
+                        draw_text +: {
+                            color: #x4DB6AC
+                            text_style: theme.font_regular{font_size: 11}
+                        }
+                    }
+
+                    Label {
+                        width: Fit
+                        height: Fit
+                        padding: 0
+                        text: "视觉理解"
+                        draw_text +: {
+                            color: #x4DB6AC
+                            text_style: theme.font_regular{font_size: 10}
+                        }
+                    }
+                }
+            }
+
+            // 下行：12px 描述，超长省略
+            model_desc := Label {
+                width: Fill
+                height: Fit
+                padding: 0
+                max_lines: 1
+                text_overflow: Ellipsis
+                text: ""
+                draw_text +: {
+                    color: #xB3B3B3
+                    text_style: theme.font_regular{font_size: 12}
+                }
+            }
+        }
+
+        // 右侧对勾（仅选中项显示；颜色固定 #B3B3B3）
+        View {
+            width: Fill
+            height: Fill
+            flow: Right
+            align: Align{x: 1.0, y: 0.5}
+            padding: Inset{right: 10}
+
+            check := Label {
+                width: 14
+                height: 14
+                padding: 0
+                visible: false
+                text: "✓"
+                draw_text +: {
+                    color: #xB3B3B3
+                    text_style: theme.font_regular{font_size: 14}
+                }
+            }
+        }
+    }
+
+    let ModelList = #(ModelList::register_widget(vm)) {
+        width: Fill
+        height: Fit
+
+        model_rows := PortalList {
+            width: Fill
+            height: 320
+            flow: Down
+            reuse_items: false
+
+            Row := ModelRow {}
         }
     }
 
@@ -1799,6 +2163,328 @@ script_mod! {
                                             height: 36
                                             // 警示红：GlassButton 没有 destructive 变体，靠 tint 自己调
                                             draw_glass +: { tint: vec4(0.85, 0.24, 0.20, 0.40) }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // ── 设置抽屉（规格 §5；本轮只做「切换模型」）
+                        // 用 Modal 做外壳：它是 overlay（on_after_apply 把 Walk 钉成 empty），
+                        // 不占 body 布局；遮罩、点遮罩关闭、Esc 关闭都直接复用。
+                        // 贴右：Modal 根部 flow 是 Overlay，align x:1.0 即右对齐；
+                        // content 固定 320 宽、全高，点在它左侧的遮罩上仍会关闭。
+                        settings_drawer := Modal {
+                            align: Align{x: 1.0, y: 0.0}
+                            bg_view +: {
+                                draw_bg +: {
+                                    // 规格 §5：rgba(0,0,0,0.5)；Makepad 没有 backdrop blur
+                                    color: #x00000080
+                                }
+                            }
+                            content +: {
+                                width: 320
+                                height: Fill
+                                flow: Down
+
+                                drawer_panel := RoundedView {
+                                    width: Fill
+                                    height: Fill
+                                    flow: Down
+                                    show_bg: true
+                                    // rgba(26,26,26,0.8)
+                                    draw_bg.color: #x1a1a1acc
+                                    draw_bg.border_size: 1.0
+                                    draw_bg.border_color: #xffffff1a
+                                    draw_bg.border_radius: uniform(0.)
+
+                                    // 头部：标题 18px + 关闭按钮（§5）
+                                    RoundedView {
+                                        width: Fill
+                                        height: 56
+                                        flow: Right
+                                        align: Align{y: 0.5}
+                                        padding: Inset{left: 16 right: 16 top: 12 bottom: 12}
+                                        show_bg: true
+                                        draw_bg.color: #x00000000
+                                        draw_bg.border_radius: uniform(0.)
+
+                                        Label {
+                                            width: Fit
+                                            height: Fit
+                                            padding: 0
+                                            text: "设置"
+                                            draw_text +: {
+                                                color: #xffffffff
+                                                text_style: theme.font_bold{font_size: 18}
+                                            }
+                                        }
+
+                                        View { width: Fill height: 1 }
+
+                                        drawer_close_button := glass.Button {
+                                            text: "×"
+                                            width: 28
+                                            height: 28
+                                            padding: 0
+                                            draw_text +: {
+                                                color: #xB3B3B3
+                                                color_hover: #xffffffff
+                                                text_style: theme.font_regular{font_size: 18}
+                                            }
+                                            draw_bg +: {
+                                                border_size: 0.0
+                                                border_radius: uniform(12.0)
+                                                color: #x00000000
+                                                color_hover: #x262626
+                                                color_down: #x333333
+                                                border_color: #x00000000
+                                                border_color_hover: #x00000000
+                                                border_color_down: #x00000000
+                                                top_glint: #x00000000
+                                                inner_shadow: #x00000000
+                                            }
+                                        }
+                                    }
+
+                                    // 头部底边 1px（§5）
+                                    RectView {
+                                        width: Fill
+                                        height: 1
+                                        show_bg: true
+                                        draw_bg.color: #x333333
+                                    }
+
+                                    // 内容区：内距 16、段间 24
+                                    View {
+                                        width: Fill
+                                        height: Fill
+                                        flow: Down
+                                        spacing: 24.
+                                        padding: Inset{left: 16 top: 16 right: 16 bottom: 16}
+
+                                        // ── 第 1 段：切换模型（§5-1 / §6）
+                                        View {
+                                            width: Fill
+                                            height: Fit
+                                            flow: Down
+                                            spacing: 8.
+
+                                            View {
+                                                width: Fill
+                                                height: Fit
+                                                flow: Right
+                                                spacing: 8.
+                                                align: Align{y: 0.5}
+
+                                                Label {
+                                                    width: Fit
+                                                    height: Fit
+                                                    padding: 0
+                                                    text: "⇄"
+                                                    draw_text +: {
+                                                        color: #xF38181
+                                                        text_style: theme.font_regular{font_size: 16}
+                                                    }
+                                                }
+
+                                                Label {
+                                                    width: Fit
+                                                    height: Fit
+                                                    padding: 0
+                                                    text: "切换模型"
+                                                    draw_text +: {
+                                                        color: #xffffffff
+                                                        text_style: theme.font_regular{font_size: 14}
+                                                    }
+                                                }
+                                            }
+
+                                            // 触发器：36 高、圆角 10、1px 边框、底 rgba(38,38,38,0.5)
+                                            RoundedView {
+                                                width: Fill
+                                                height: 36
+                                                flow: Overlay
+                                                show_bg: true
+                                                draw_bg.color: #x26262680
+                                                draw_bg.border_size: 1.0
+                                                draw_bg.border_color: #xffffff1a
+                                                draw_bg.border_radius: uniform(10.)
+
+                                                View {
+                                                    width: Fill
+                                                    height: Fill
+                                                    flow: Right
+                                                    spacing: 8.
+                                                    align: Align{y: 0.5}
+                                                    padding: Inset{left: 10 right: 10}
+
+                                                    model_trigger_label := Label {
+                                                        width: Fill
+                                                        height: Fit
+                                                        padding: 0
+                                                        max_lines: 1
+                                                        text_overflow: Ellipsis
+                                                        text: "Qwen3.8-Flash"
+                                                        draw_text +: {
+                                                            color: #xffffffff
+                                                            text_style: theme.font_regular{font_size: 14}
+                                                        }
+                                                    }
+
+                                                    Label {
+                                                        width: Fit
+                                                        height: Fit
+                                                        padding: 0
+                                                        text: "▼"
+                                                        draw_text +: {
+                                                            color: #xB3B3B3
+                                                            text_style: theme.font_regular{font_size: 14}
+                                                        }
+                                                    }
+                                                }
+
+                                                // 透明按钮盖在触发器上：单击展开/收起。
+                                                // 文字留给上面的 Label，按钮只负责命中与 hover 亮底。
+                                                model_trigger_button := ButtonFlat {
+                                                    width: Fill
+                                                    height: Fill
+                                                    margin: 0
+                                                    padding: 0
+                                                    text: ""
+                                                    draw_text +: {
+                                                        color: #x00000000
+                                                        color_hover: #x00000000
+                                                        color_down: #x00000000
+                                                        color_focus: #x00000000
+                                                        color_disabled: #x00000000
+                                                    }
+                                                    draw_bg +: {
+                                                        border_size: 0.0
+                                                        border_radius: uniform(10.)
+                                                        color: #x00000000
+                                                        color_hover: #xffffff0d
+                                                        color_down: #xffffff1a
+                                                        color_focus: #x00000000
+                                                        color_disabled: #x00000000
+                                                        color_2: #x00000000
+                                                        color_2_hover: #x00000000
+                                                        color_2_down: #x00000000
+                                                        color_2_focus: #x00000000
+                                                        color_2_disabled: #x00000000
+                                                        border_color: #x00000000
+                                                        border_color_hover: #x00000000
+                                                        border_color_down: #x00000000
+                                                        border_color_focus: #x00000000
+                                                        border_color_disabled: #x00000000
+                                                    }
+                                                }
+                                            }
+
+                                            // 模型列表（§6）：容器底 #1A1A1A、圆角 10、1px #333。
+                                            // 显隐与高度由 Rust 侧 `set_models_open` 管：
+                                            // visible:false 在 Makepad 里仍占布局，必须同时把高度压成 0。
+                                            model_list_box := RoundedView {
+                                                width: Fill
+                                                height: Fit
+                                                visible: false
+                                                flow: Down
+                                                padding: Inset{left: 0 top: 4 right: 0 bottom: 4}
+                                                show_bg: true
+                                                draw_bg.color: #x1A1A1A
+                                                draw_bg.border_size: 1.0
+                                                draw_bg.border_color: #x333333
+                                                draw_bg.border_radius: uniform(10.)
+
+                                                model_list := ModelList {
+                                                    width: Fill
+                                                }
+                                            }
+
+                                            // 列表下方：「当前: X」+ 视觉理解徽章
+                                            View {
+                                                width: Fill
+                                                height: Fit
+                                                flow: Right
+                                                spacing: 6.
+                                                align: Align{y: 0.5}
+
+                                                model_current_label := Label {
+                                                    width: Fit
+                                                    height: Fit
+                                                    padding: 0
+                                                    text: "当前: Qwen3.8-Flash"
+                                                    draw_text +: {
+                                                        color: #xB3B3B3
+                                                        text_style: theme.font_regular{font_size: 12}
+                                                    }
+                                                }
+
+                                                current_badge := RoundedView {
+                                                    width: Fit
+                                                    height: Fit
+                                                    flow: Right
+                                                    spacing: 3.
+                                                    align: Align{y: 0.5}
+                                                    padding: Inset{left: 6 top: 2 right: 6 bottom: 2}
+                                                    show_bg: true
+                                                    draw_bg.color: #x95E1D333
+                                                    draw_bg.border_radius: uniform(99.)
+
+                                                    Label {
+                                                        width: Fit
+                                                        height: Fit
+                                                        padding: 0
+                                                        text: "👁"
+                                                        draw_text +: {
+                                                            color: #x4DB6AC
+                                                            text_style: theme.font_regular{font_size: 11}
+                                                        }
+                                                    }
+
+                                                    Label {
+                                                        width: Fit
+                                                        height: Fit
+                                                        padding: 0
+                                                        text: "视觉理解"
+                                                        draw_text +: {
+                                                            color: #x4DB6AC
+                                                            text_style: theme.font_regular{font_size: 10}
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        // 段间分隔线（§5）
+                                        RectView {
+                                            width: Fill
+                                            height: 1
+                                            show_bg: true
+                                            draw_bg.color: #x333333
+                                        }
+
+                                        // 后两段本轮只放标题占位（头像上传 / 深浅色模式下轮做）
+                                        Label {
+                                            width: Fill
+                                            height: Fit
+                                            padding: 0
+                                            text: "更改头像（下轮实现）"
+                                            draw_text +: {
+                                                color: #xB3B3B3
+                                                text_style: theme.font_regular{font_size: 14}
+                                            }
+                                        }
+
+                                        Label {
+                                            width: Fill
+                                            height: Fit
+                                            padding: 0
+                                            text: "深色 / 浅色模式（下轮实现）"
+                                            draw_text +: {
+                                                color: #xB3B3B3
+                                                text_style: theme.font_regular{font_size: 14}
+                                            }
                                         }
                                     }
                                 }
