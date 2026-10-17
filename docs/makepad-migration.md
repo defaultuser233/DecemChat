@@ -346,7 +346,7 @@ Makepad 侧用 `default-features = false` 引入。
 
 ### 10.2 两个坑（都踩过，别再踩）
 
-**① 别把 `Image` 放进输入行。**
+**① `Image` 不要写 `Fit` 轴，也别让"空图"参与布局——NaN 会毒掉整行（详见 §12）。**
 把预览图作为输入行（`View{flow: Right}`）的一个子部件时，**`glass.TextInput` 会拿不到键盘焦点**：
 点上去没有聚焦环、打字不进去，但整个 App 是活的（点按钮能开对话框）。
 从截图能看出线索——输入框的描边从行的最左边开始、盖住了左边的按钮，说明 `Image` 的
@@ -392,3 +392,46 @@ Makepad 侧用 `default-features = false` 引入。
    只能在 stdout 里看 `[E]` 行。所以改完 UI **必须启动一次并 grep `\[E\]`**。
 2. **`Image` 的宽度必须是 `Fill`**。用 `Fit` 时它会占住一块高度却**不画纹理**
    （用户气泡变成一块空白橙色方块），看起来像"图没发出去"，其实只是没画。
+
+## 12. `Image` 的 NaN 陷阱（§10.2 ① 的准确机制）
+
+之前手册里把「输入框丢键盘焦点」归因成"把 `Image` 放进了输入行"，**这个因果是错的**：
+`＋图` 按钮一直在那一行里、从未出问题。真正的机制是 **NaN 污染**，证据在
+`widgets/core/src/image.rs`：
+
+```rust
+// 1176-1179  空图没有纹理 → 尺寸取 placeholder（默认 0）
+(self.placeholder_width as f64 / dpi, self.placeholder_height as f64 / dpi)   // (0, 0)
+
+// 1208
+let aspect = width / height;          // 0.0 / 0.0 = NaN
+
+// 1209  源码自己的注释：A Fit height peeks as NaN
+
+// 1250-1256  fit: Smallest
+ImageFit::Smallest => {
+    let walk_height = rect.size.x / aspect;   // NaN
+    if walk_height > avail_height { .. }      // NaN 比较恒为 false
+    else { walk.height = Size::Fixed(walk_height); }   // ← 把 NaN 写进 walk
+}
+```
+
+链路：空图 → `aspect` NaN →（`Fit` 轴的 `rect.size.x` 本身也是 NaN）→ `height = Fixed(NaN)`
+→ 行是 `flow: Right`，**下一个子部件的位置由上一个的 rect 推出来**，NaN 顺着兄弟节点传播
+→ `TextInput` 的矩形变 NaN → 命中测试 `rect.contains(abs)` 对 NaN 恒为 false
+→ 永远收不到 `Hit::FingerDown` → 而 `TextInput` 唯一的聚焦入口就是那里
+（`text_input.rs:3084-3093` 的 `self.set_key_focus(cx)`）。
+
+同一条链解释了三个现象：
+
+| 现象 | 同一个 NaN |
+| --- | --- |
+| 输入行里的空图 → 输入框丢焦点 | NaN 高度污染整行，命中区失效 |
+| 气泡里 `width: Fit` 的图**占位却不显示** | `rect.size.x` 是 NaN → 同样 `Fixed(NaN)`，绘制 scale 也坏 |
+| 纯文字气泡被撑高一大块 | 空图 NaN 高度落回"请求的高度"（`max_height`）→ 占位不画 |
+
+✅ 两条修法：**宽度用 `Fill`（别用 `Fit`）** + **没有图时 `set_visible(false)`**
+（`Image` 有 `#[visible]`，`!visible` 时既不画也不占位）。
+
+延伸规则：任何一个部件的尺寸若可能来自"无边界的除法/比例计算"，都不要让它以 `Fit`
+参与同行的布局；Makepad 没有 CSS 那种把 NaN 钳到 0 的兜底。
