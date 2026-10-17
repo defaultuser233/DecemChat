@@ -491,6 +491,16 @@ pub struct ChatList {
 }
 
 impl Widget for ChatList {
+    /// 必须自己把事件转发给内部的 `#[deref] view`。
+    ///
+    /// `Widget::handle_event` 的**默认实现是空的**（`widget.rs:302`），而 `#[derive(Widget)]`
+    /// 只生成 `WidgetNode`、不生成转发（`derive_widget.rs:108`）。所以一个自定义容器
+    /// 如果不写这个方法，里面的 `PortalList` 就**收不到任何鼠标事件**——
+    /// 表现为：列表里的按钮点不动、拖拽滚动失效、文字选不了。
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.view.handle_event(cx, event, scope);
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let chat = CHAT.read().unwrap();
 
