@@ -435,3 +435,31 @@ ImageFit::Smallest => {
 
 延伸规则：任何一个部件的尺寸若可能来自"无边界的除法/比例计算"，都不要让它以 `Fit`
 参与同行的布局；Makepad 没有 CSS 那种把 NaN 钳到 0 的兜底。
+## 13. 背景不黑的两个原因（2026-10-17 已修）
+
+窗口主体一度渲染成 `#4C4C4C` 而不是写死的 `#000000`，是两个独立问题叠加：
+
+1. **裸 `View` 画不了纯色。** `View.draw_bg` 是 `DrawQuad`，而 `DrawQuad` 的脚本
+   着色器 `pixel` 直接 `return #0000`，结构体里也没有 `color` 字段
+   （`draw/src/shader/draw_quad.rs:65-67`；`view.rs:77`；`view_ui.rs:5` 的
+   `mod.widgets.View = mod.widgets.ViewBase {}` 没有补着色器）。
+   于是 `View{show_bg: true draw_bg.color: #x000000}` 会接受属性、一个像素都不画。
+   Makepad 自己的注释说得更直白：`apps/storybook/src/shell.rs:110-114`
+   （"a bare View's draw_bg has no `color`"）。
+   ✅ 纯色底用 `SolidView`（`view_ui.rs:85`），圆角面板用 `RoundedView`。
+2. **`desktop_style::install` 装晚了。** `makepad_widgets::script_mod` 的第一步就是
+   按当前 StyleSheet 求值 `theme.splash`（`desktop_style.rs:281`），部件注册完再
+   补 `widgets.splash`（`:297`）。在它之后再 install，整棵树拿到的仍是默认暗色：
+   `theme.color_bg_app = mix(#000, #fff, 0.3) = #4C4C4C`
+   （`theme_desktop_dark.rs:143-146,169-173`），窗口 clear 色也就停在这个灰
+   （`window.rs:154`）上。black-orange 本来会把它改成 `#14171c`
+   （`widgets/themes/black-orange/widgets.splash:6`）。
+   ✅ install 必须放在 `makepad_widgets::script_mod` **之前**；
+   Makepad 自己的 `apps/storybook/src/theme.rs:105-113` 也是这个顺序。
+
+修法与验收：根底 `SolidView{draw_bg.color: #x000000}`，并给 `Window` 加
+`pass +: { clear_color: #x000000 }` 兜住边缝。`System.Drawing` 采窗口截图，
+`(100,300) / (1200,300) / (700,900) / (20,20)` 均为 `#000000`。
+
+附带踩到的坑：`new_batch: true` 不要加在 `Modal` 的卡片上——实测按 Esc 关闭后
+卡片与文字消失、按钮残留（overlay 复用了旧批次）；去掉即正常。

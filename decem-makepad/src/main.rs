@@ -845,12 +845,17 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+        // 近黑 + 橙的风格（Makepad 自带），与 Decem 的调性接近。
+        // **必须装在任何 script_mod 之前**：`makepad_widgets::script_mod` 一开始就
+        // 用当前 StyleSheet 求值 theme.splash（desktop_style.rs:281），注册完部件
+        // 再补 widgets.splash（desktop_style.rs:297）。装晚了整棵树拿到的还是默认
+        // 暗色主题，窗口 clear 色也就停在默认暗色的 #4C4C4C，而不是
+        // black-orange 的 #14171c（widgets/themes/black-orange/widgets.splash:6）。
+        desktop_style::install(vm, StyleSheet::load(DesktopStyle::BlackOrange));
         crate::makepad_widgets::script_mod(vm);
         // CodeView（带语法高亮的代码块）属于独立的 makepad-code-editor crate，
         // 必须先注册它的脚本部件，下面 script_mod! 里的 `use mod.widgets.CodeView` 才能解析
         makepad_code_editor::script_mod(vm);
-        // 近黑 + 橙的风格（Makepad 自带），与 Decem 的调性接近
-        desktop_style::install(vm, StyleSheet::load(DesktopStyle::BlackOrange));
         self::script_mod(vm)
     }
 
@@ -1027,8 +1032,16 @@ script_mod! {
             main_window := Window{
                 window.title: "Decem Chat"
                 window.inner_size: vec2(980, 760)
+                // 窗口 render pass 的 clear 色默认取 theme.color_bg_app
+                // （widgets/core/src/window.rs:154）；这里钉成纯黑，保证窗口
+                // 没有任何一条边缝漏出主题灰。
+                pass +: { clear_color: #x000000 }
                 body +: {
-                    View{
+                    // 纯色底必须用 SolidView：裸 View 的 draw_bg 是 DrawQuad，
+                    // 着色器里根本没有 color（pixel 直接返回 #0000），
+                    // `show_bg: true` + `draw_bg.color` 会“接受属性、一个像素都不画”
+                    // （apps/storybook/src/shell.rs:110-114、draw/src/shader/draw_quad.rs:65-67）。
+                    SolidView{
                         width: Fill
                         height: Fill
                         flow: Down
@@ -1107,7 +1120,9 @@ script_mod! {
                                 // 固定宽卡片 + Fill 子项：与 makepad 自带的
                                 // Dialog（dialog.rs）和 modal_footprint 示例
                                 // 同一个模式。宽度照 Dialog 的 420 收一档。
-                                card := View {
+                                // RoundedView 而不是 View：裸 View 的 draw_bg 没有
+                                // color/border_radius，卡片会整个透明（同根因，见上）。
+                                card := RoundedView {
                                     width: 360
                                     height: Fit
                                     flow: Down
