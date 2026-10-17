@@ -271,6 +271,217 @@ fn load_item_avatar(cx: &mut Cx, item: &WidgetRef, role: Role) {
     }
 }
 
+// ---------------------------------------------------------------- 深色/浅色
+
+/// 主题模式。网页版对应 `settings.isDarkMode`（localStorage）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ThemeMode {
+    #[default]
+    Dark,
+    Light,
+}
+
+impl ThemeMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Dark => "dark",
+            Self::Light => "light",
+        }
+    }
+
+    fn toggled(self) -> Self {
+        match self {
+            Self::Dark => Self::Light,
+            Self::Light => Self::Dark,
+        }
+    }
+
+    fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "dark" => Some(Self::Dark),
+            "light" => Some(Self::Light),
+            _ => None,
+        }
+    }
+}
+
+/// 当前模式。`script_mod` 在启动与每次样式重载时都会读它来决定装哪套
+/// `StyleSheet`，所以必须放在静态变量里，而不是 `App` 字段。
+static THEME: RwLock<ThemeMode> = RwLock::new(ThemeMode::Dark);
+static THEME_INIT: OnceLock<()> = OnceLock::new();
+
+/// `%APPDATA%\DecemChat\theme`（与头像同目录）。
+fn theme_file() -> Option<PathBuf> {
+    avatar_dir().map(|dir| dir.join("theme"))
+}
+
+/// 启动时的优先级：`DECEM_THEME` 环境变量 > 持久化文件 > 深色。
+/// 环境变量只覆盖本次运行、不落盘——否则自动化一跑就会改掉用户的选择。
+fn load_theme_mode() -> ThemeMode {
+    if let Ok(value) = std::env::var("DECEM_THEME") {
+        if let Some(mode) = ThemeMode::parse(&value) {
+            return mode;
+        }
+    }
+    theme_file()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| ThemeMode::parse(&text))
+        .unwrap_or_default()
+}
+
+fn theme_mode() -> ThemeMode {
+    THEME_INIT.get_or_init(|| {
+        *THEME.write().unwrap() = load_theme_mode();
+    });
+    *THEME.read().unwrap()
+}
+
+fn set_theme_mode(mode: ThemeMode) {
+    let _ = theme_mode();
+    *THEME.write().unwrap() = mode;
+}
+
+fn save_theme_mode(mode: ThemeMode) -> Result<(), String> {
+    let path = theme_file().ok_or_else(|| "读不到 APPDATA 环境变量，无法保存主题".to_owned())?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)
+            .map_err(|err| format!("建不了目录 {}：{err}", dir.display()))?;
+    }
+    std::fs::write(&path, format!("{}\n", mode.as_str()))
+        .map_err(|err| format!("写不了 {}：{err}", path.display()))
+}
+
+/// 深色沿用原样（BlackOrange）；浅色借 Makepad 的 Windows 浅色 sheet。
+/// `DesktopStyle` 没有独立的 "Light" 变体，Windows 是其中最中性的一套浅色令牌；
+/// 界面上的主要颜色仍由下面的 `Palette` 逐项覆盖（`theme` 只负责 Markdown、
+/// GlassButton、TextInput 光标/选区这些主题驱动的部件）。
+fn theme_stylesheet(mode: ThemeMode) -> StyleSheet {
+    match mode {
+        ThemeMode::Dark => StyleSheet::load(DesktopStyle::BlackOrange),
+        ThemeMode::Light => StyleSheet::load(DesktopStyle::Windows),
+    }
+}
+
+/// `#xRRGGBBAA` → `Vec4f`，与脚本里的颜色字面量同一字节序。
+fn rgba(hex: u32) -> Vec4f {
+    vec4(
+        ((hex >> 24) & 0xff) as f32 / 255.0,
+        ((hex >> 16) & 0xff) as f32 / 255.0,
+        ((hex >> 8) & 0xff) as f32 / 255.0,
+        (hex & 0xff) as f32 / 255.0,
+    )
+}
+
+/// App 自己画的所有颜色。写死的深色必须在这里成对给出浅色值，
+/// 否则切到浅色会只剩「浅底 + 深色块」。
+#[derive(Clone, Copy)]
+struct Palette {
+    /// 根背景与窗口 clear 色
+    bg: Vec4f,
+    /// 主文字/标题
+    fg: Vec4f,
+    /// 次级文字（时间戳、描述、提示）
+    muted_fg: Vec4f,
+    /// 1px 分隔线/边框
+    border: Vec4f,
+    /// 顶栏/抽屉的玻璃底
+    glass: Vec4f,
+    /// 玻璃底的 1px 边框
+    glass_border: Vec4f,
+    /// char 气泡底
+    bubble: Vec4f,
+    /// char 气泡 1px 边框
+    bubble_border: Vec4f,
+    /// 输入区外层底
+    input_bg: Vec4f,
+    /// 胶囊/模型触发器/主题行底（muted/50）
+    row_bg: Vec4f,
+    /// 图标按钮 hover / 关闭按钮 hover
+    hover: Vec4f,
+    /// 图标按钮按下
+    hover_down: Vec4f,
+    /// 透明按钮盖层的 hover/down 叠加色
+    tint_hover: Vec4f,
+    tint_down: Vec4f,
+    /// 确认弹层卡片
+    card: Vec4f,
+    /// 模型下拉列表容器
+    model_list_bg: Vec4f,
+    /// Modal 遮罩
+    mask: Vec4f,
+    /// 开关轨道：深色模式（开）珊瑚，浅色模式（关）深灰
+    switch_track: Vec4f,
+    /// 开关滑块
+    switch_knob: Vec4f,
+    /// 发送键禁用底色/文字
+    disabled_bg: Vec4f,
+    disabled_fg: Vec4f,
+}
+
+fn palette() -> Palette {
+    match theme_mode() {
+        ThemeMode::Dark => Palette {
+            bg: rgba(0x000000FF),
+            fg: rgba(0xFFFFFFFF),
+            muted_fg: rgba(0xB3B3B3FF),
+            border: rgba(0x333333FF),
+            glass: rgba(0x1A1A1ACC),
+            glass_border: rgba(0xFFFFFF1A),
+            bubble: rgba(0x1A1A1AFF),
+            bubble_border: rgba(0xFFFFFF1A),
+            input_bg: rgba(0x141414CC),
+            row_bg: rgba(0x26262680),
+            hover: rgba(0x262626FF),
+            hover_down: rgba(0x333333FF),
+            tint_hover: rgba(0xFFFFFF0D),
+            tint_down: rgba(0xFFFFFF1A),
+            card: rgba(0x2B2B35FF),
+            model_list_bg: rgba(0x1A1A1AFF),
+            mask: rgba(0x00000080),
+            switch_track: rgba(0xF18484FF),
+            switch_knob: rgba(0x000000FF),
+            disabled_bg: rgba(0x26262680),
+            disabled_fg: rgba(0xB3B3B380),
+        },
+        // 浅色值取自网页版 `src/index.css` 的 `.light` 段：
+        // background #F2F2F2、foreground #1A1A1A、muted #E6E6E6、
+        // muted-foreground #666666、border #D9D9D9、message-bot #FFFFFF，
+        // 玻璃底 `rgba(255,255,255,0.8)`，遮罩 `rgba(0,0,0,0.3)`。
+        ThemeMode::Light => Palette {
+            bg: rgba(0xF2F2F2FF),
+            fg: rgba(0x1A1A1AFF),
+            muted_fg: rgba(0x666666FF),
+            border: rgba(0xD9D9D9FF),
+            glass: rgba(0xFFFFFFCC),
+            glass_border: rgba(0x0000001A),
+            bubble: rgba(0xFFFFFFFF),
+            bubble_border: rgba(0x0000001A),
+            input_bg: rgba(0xF2F2F2CC),
+            row_bg: rgba(0xE6E6E680),
+            hover: rgba(0xE6E6E6FF),
+            hover_down: rgba(0xD9D9D9FF),
+            tint_hover: rgba(0x0000000D),
+            tint_down: rgba(0x0000001A),
+            card: rgba(0xFFFFFFFF),
+            model_list_bg: rgba(0xFFFFFFFF),
+            mask: rgba(0x0000004D),
+            switch_track: rgba(0x262626FF),
+            switch_knob: rgba(0xFFFFFFFF),
+            disabled_bg: rgba(0xE6E6E680),
+            disabled_fg: rgba(0x66666680),
+        },
+    }
+}
+
+/// 开关滑块位置：轨道 32 宽、滑块 16、上下留 1.2。
+fn switch_knob_left() -> f64 {
+    if theme_mode() == ThemeMode::Dark {
+        32.0 - 16.0 - 1.2
+    } else {
+        1.2
+    }
+}
+
 /// 单张图的上限。服务端把请求体放宽到 20MB，这里留足余量。
 const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 
@@ -770,17 +981,14 @@ impl Widget for ModelRow {
             .get(self.index)
             .is_some_and(|model| model.id == current_model_id());
         let active = selected || self.hovered;
-        // 选中/悬停：accent 底 + 黑字；其余白字 / 灰描述（规格 §6）
+        // 选中/悬停：accent 底 + 黑字；其余用当前模式的正文/次级灰（规格 §6）
+        let p = palette();
         let ink = if active {
             vec4(0.0, 0.0, 0.0, 1.0)
         } else {
-            vec4(1.0, 1.0, 1.0, 1.0)
+            p.fg
         };
-        let sub_ink = if active {
-            ink
-        } else {
-            vec4(0.70, 0.70, 0.70, 1.0)
-        };
+        let sub_ink = if active { ink } else { p.muted_fg };
 
         self.view.widget(cx, ids!(row_hl)).set_visible(cx, active);
         self.view
@@ -1065,6 +1273,36 @@ impl App {
             None => photo.set_visible(cx, false),
         }
         self.reload_header_avatar(cx);
+    }
+
+    /// 抽屉里的深浅色行：文字与图标随模式变。颜色由 `script_mod` 里的
+    /// `palette()` 插值在样式重载时更新；这里只负责字符串（`ScriptReapply`
+    /// 会保留运行期 setter 写进去的文字，不会用脚本里的空串盖回来）。
+    fn sync_theme_ui(&self, cx: &mut Cx) {
+        let dark = theme_mode() == ThemeMode::Dark;
+        self.ui
+            .label(cx, ids!(theme_mode_label))
+            .set_text(cx, if dark { "深色模式" } else { "浅色模式" });
+        self.ui
+            .label(cx, ids!(theme_mode_icon))
+            // 自带字体缺 ☾/☀ 这类几何符号（会显示成豆腐块），用彩色 emoji：
+            // 与 ✨/🦊 同一套字形，颜色由 emoji 字体自带（黄色）。
+            .set_text(cx, if dark { "🌙" } else { "☀️" });
+    }
+
+    /// 切换主题：先改全局状态（`script_mod` 重载时读它），落盘，再请求
+    /// 样式重载。真正重绘发生在下一个 `Event::LiveEdit`，`Apply::ScriptReapply`
+    /// 会保留输入框文字与正在运行的动画。
+    fn set_theme(&mut self, cx: &mut Cx, mode: ThemeMode) {
+        if theme_mode() == mode {
+            return;
+        }
+        set_theme_mode(mode);
+        if let Err(reason) = save_theme_mode(mode) {
+            push_message(format!("⚠️ 主题已切换，但保存失败：{reason}"));
+        }
+        self.sync_theme_ui(cx);
+        desktop_style::handle_event(cx, &Event::Custom(theme_stylesheet(mode).to_json()));
     }
 
     /// 一次性启动钩子：`DECEM_IMAGE=<路径>` 时把这张图直接放进待发槽位。
@@ -1370,7 +1608,17 @@ impl MatchEvent for App {
             self.sync_model_ui(cx);
             // 抽屉里的头像预览可能与最新状态不同步（换头像只改了全局状态）
             self.sync_avatar_ui(cx);
+            self.sync_theme_ui(cx);
             self.ui.modal(cx, ids!(settings_drawer)).open(cx);
+        }
+        // 深浅色开关：翻转模式并立即请求样式重载。
+        if self
+            .ui
+            .button(cx, ids!(theme_toggle_button))
+            .clicked(actions)
+        {
+            let next = theme_mode().toggled();
+            self.set_theme(cx, next);
         }
         // 「上传头像」：走与图片消息同一个系统文件对话框，id 不同。
         if self
@@ -1445,13 +1693,16 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
-        // 近黑 + 橙的风格（Makepad 自带），与 Decem 的调性接近。
+        // 深色沿用近黑 + 橙的 BlackOrange；浅色借 Windows 的浅色 sheet。
         // **必须装在任何 script_mod 之前**：`makepad_widgets::script_mod` 一开始就
         // 用当前 StyleSheet 求值 theme.splash（desktop_style.rs:281），注册完部件
         // 再补 widgets.splash（desktop_style.rs:297）。装晚了整棵树拿到的还是默认
         // 暗色主题，窗口 clear 色也就停在默认暗色的 #4C4C4C，而不是
         // black-orange 的 #14171c（widgets/themes/black-orange/widgets.splash:6）。
-        desktop_style::install(vm, StyleSheet::load(DesktopStyle::BlackOrange));
+        //
+        // 每次样式重载都会重跑这个函数，所以这里读 `theme_mode()` 而不是写死：
+        // `desktop_style::handle_event` 装好的 sheet 不会被这里又盖回深色。
+        desktop_style::install(vm, theme_stylesheet(theme_mode()));
         crate::makepad_widgets::script_mod(vm);
         // CodeView（带语法高亮的代码块）属于独立的 makepad-code-editor crate，
         // 必须先注册它的脚本部件，下面 script_mod! 里的 `use mod.widgets.CodeView` 才能解析
@@ -1525,6 +1776,8 @@ impl AppMain for App {
             self.sync_model_ui(cx);
             // 头像预览也在同一批部件里，建好就贴一次图
             self.sync_avatar_ui(cx);
+            // 深浅色行的文字：脚本里的 `text` 只是空串，首帧由 Rust 写入
+            self.sync_theme_ui(cx);
         }
         self.poll_worker(cx);
     }
@@ -1608,7 +1861,9 @@ script_mod! {
                             width: Fill
                             height: Fit
                             show_bg: true
-                            draw_bg.color: #x1a1a1a
+                            draw_bg.color: #(palette().bubble)
+                            draw_bg.border_size: 1.0
+                            draw_bg.border_color: #(palette().bubble_border)
                             draw_bg.border_radius: uniform(16.)
                             padding: Inset{left: 14 top: 10 right: 14 bottom: 10}
 
@@ -1661,7 +1916,7 @@ script_mod! {
                         padding: 0
                         text: ""
                         draw_text +: {
-                            color: #xB3B3B3
+                            color: #(palette().muted_fg)
                             text_style: theme.font_regular{font_size: 12}
                         }
                     }
@@ -1674,6 +1929,9 @@ script_mod! {
                         width: Fit
                         height: 30
                         padding: Inset{left: 12 right: 12 top: 0 bottom: 0}
+                        // GlassButton 的默认文字是白的（glass_panel.rs:252），
+                        // 浅色模式下白字压在白玻璃上会看不见；珊瑚在两种模式都清楚。
+                        draw_text +: { color: #xF38181 }
                         // 淡珊瑚：与用户气泡的珊瑚（#F38181）同族，提示这是对最后一段问答的操作
                         draw_glass +: { tint: vec4(0.95, 0.51, 0.51, 0.18) }
                     }
@@ -1724,6 +1982,9 @@ script_mod! {
                                 width: Fill
                                 height: Fit
                                 body: ""
+                                // 浅色主题的正文色是深色；用户气泡是珊瑚底，必须钉白字。
+                                font_color: #xffffffff
+                                draw_text +: { color: #xffffffff }
                             }
                         }
                     }
@@ -1749,7 +2010,7 @@ script_mod! {
                         padding: 0
                         text: ""
                         draw_text +: {
-                            color: #xB3B3B3
+                            color: #(palette().muted_fg)
                             text_style: theme.font_regular{font_size: 12}
                         }
                     }
@@ -1801,7 +2062,7 @@ script_mod! {
                     padding: 0
                     text: ""
                     draw_text +: {
-                        color: #xffffffff
+                        color: #(palette().fg)
                         text_style: theme.font_regular{font_size: 14}
                     }
                 }
@@ -1851,7 +2112,7 @@ script_mod! {
                 text_overflow: Ellipsis
                 text: ""
                 draw_text +: {
-                    color: #xB3B3B3
+                    color: #(palette().muted_fg)
                     text_style: theme.font_regular{font_size: 12}
                 }
             }
@@ -1899,9 +2160,9 @@ script_mod! {
                 window.title: "Decem Chat"
                 window.inner_size: vec2(980, 760)
                 // 窗口 render pass 的 clear 色默认取 theme.color_bg_app
-                // （widgets/core/src/window.rs:154）；这里钉成纯黑，保证窗口
-                // 没有任何一条边缝漏出主题灰。
-                pass +: { clear_color: #x000000 }
+                // （widgets/core/src/window.rs:154）；这里按当前模式钉成根背景色，
+                // 保证窗口没有任何一条边缝漏出主题灰。
+                pass +: { clear_color: #(palette().bg) }
                 body +: {
                     // 纯色底必须用 SolidView：裸 View 的 draw_bg 是 DrawQuad，
                     // 着色器里根本没有 color（pixel 直接返回 #0000），
@@ -1914,7 +2175,7 @@ script_mod! {
                         spacing: 0.
                         padding: 0
                         show_bg: true
-                        draw_bg.color: #x000000
+                        draw_bg.color: #(palette().bg)
 
                         // ── 顶栏（规格 §2，高 65 = 64 内容 + 1 底边）
                         // 全宽；玻璃底只用半透明色模拟（Makepad 没有 backdrop blur）。
@@ -1930,8 +2191,8 @@ script_mod! {
                                 align: Align{y: 0.5}
                                 padding: Inset{left: 16 top: 12 right: 16 bottom: 12}
                                 show_bg: true
-                                // rgba(26,26,26,0.8)
-                                draw_bg.color: #x1a1a1acc
+                                // 深色 rgba(26,26,26,0.8) / 浅色 rgba(255,255,255,0.8)
+                                draw_bg.color: #(palette().glass)
                                 draw_bg.border_radius: uniform(0.0)
 
                                 View {
@@ -1968,7 +2229,7 @@ script_mod! {
                                             }
                                         }
 
-                                        // 12×12 在线绿 + 2px 黑边（规格 §2）
+                                        // 12×12 在线绿 + 2px 背景色描边（规格 §2）
                                         RoundedView {
                                             width: 12
                                             height: 12
@@ -1976,7 +2237,7 @@ script_mod! {
                                             show_bg: true
                                             draw_bg.color: #x22C55E
                                             draw_bg.border_size: 2.0
-                                            draw_bg.border_color: #x000000
+                                            draw_bg.border_color: #(palette().bg)
                                             draw_bg.border_radius: uniform(6.0)
                                         }
                                     }
@@ -2003,7 +2264,7 @@ script_mod! {
                                                 padding: 0
                                                 text: "Decem"
                                                 draw_text +: {
-                                                    color: #xffffffff
+                                                    color: #(palette().fg)
                                                     text_style: theme.font_bold{font_size: 18}
                                                 }
                                             }
@@ -2029,7 +2290,7 @@ script_mod! {
                                             padding: 0
                                             text: "在线 - 随时陪你聊天"
                                             draw_text +: {
-                                                color: #xB3B3B3
+                                                color: #(palette().muted_fg)
                                                 text_style: theme.font_regular{font_size: 12}
                                             }
                                         }
@@ -2054,16 +2315,16 @@ script_mod! {
                                         height: 40
                                         padding: 0
                                         draw_text +: {
-                                            color: #xB3B3B3
-                                            color_hover: #xffffffff
+                                            color: #(palette().muted_fg)
+                                            color_hover: #(palette().fg)
                                             text_style: theme.font_bold{font_size: 12}
                                         }
                                         draw_bg +: {
                                             border_size: 0.0
                                             border_radius: 16.0
                                             color: #x00000000
-                                            color_hover: #x262626
-                                            color_down: #x333333
+                                            color_hover: #(palette().hover)
+                                            color_down: #(palette().hover_down)
                                             border_color: #x00000000
                                             border_color_hover: #x00000000
                                             border_color_down: #x00000000
@@ -2079,16 +2340,16 @@ script_mod! {
                                         height: 40
                                         padding: 0
                                         draw_text +: {
-                                            color: #xB3B3B3
-                                            color_hover: #xffffffff
+                                            color: #(palette().muted_fg)
+                                            color_hover: #(palette().fg)
                                             text_style: theme.font_regular{font_size: 20}
                                         }
                                         draw_bg +: {
                                             border_size: 0.0
                                             border_radius: 16.0
                                             color: #x00000000
-                                            color_hover: #x262626
-                                            color_down: #x333333
+                                            color_hover: #(palette().hover)
+                                            color_down: #(palette().hover_down)
                                             border_color: #x00000000
                                             border_color_hover: #x00000000
                                             border_color_down: #x00000000
@@ -2104,7 +2365,7 @@ script_mod! {
                                 width: Fill
                                 height: 1
                                 show_bg: true
-                                draw_bg.color: #x333333
+                                draw_bg.color: #(palette().border)
                             }
                         }
 
@@ -2153,7 +2414,7 @@ script_mod! {
                                 width: Fill
                                 height: 1
                                 show_bg: true
-                                draw_bg.color: #x333333
+                                draw_bg.color: #(palette().border)
                             }
 
                             RoundedView {
@@ -2162,8 +2423,8 @@ script_mod! {
                                 flow: Down
                                 padding: Inset{left: 12 top: 12 right: 12 bottom: 12}
                                 show_bg: true
-                                // rgba(20,20,20,0.8)
-                                draw_bg.color: #x141414cc
+                                // 深色 rgba(20,20,20,0.8) / 浅色背景色 80%
+                                draw_bg.color: #(palette().input_bg)
                                 draw_bg.border_radius: uniform(0.)
 
                                 // 待发图片的预览（规格 §4：80 高、圆角 12）。
@@ -2191,7 +2452,7 @@ script_mod! {
                                         height: 40
                                         padding: 0
                                         draw_text +: {
-                                            color: #xB3B3B3
+                                            color: #(palette().muted_fg)
                                             color_hover: #xEF4444
                                             color_down: #xEF4444
                                             text_style: theme.font_regular{font_size: 12}
@@ -2219,7 +2480,7 @@ script_mod! {
                                         height: 40
                                         padding: 0
                                         draw_text +: {
-                                            color: #xB3B3B3
+                                            color: #(palette().muted_fg)
                                             color_hover: #xF38181
                                             color_down: #xF38181
                                             text_style: theme.font_regular{font_size: 18}
@@ -2255,8 +2516,8 @@ script_mod! {
                                             align: Align{y: 0.5}
                                             padding: Inset{left: 8 top: 8 right: 8 bottom: 8}
                                             show_bg: true
-                                            // rgba(38,38,38,0.5)
-                                            draw_bg.color: #x26262680
+                                            // 深色 rgba(38,38,38,0.5) / 浅色 muted/50
+                                            draw_bg.color: #(palette().row_bg)
                                             draw_bg.border_radius: uniform(16.)
 
                                             // 14px、透明底、无边框；单行输入由 TextInput
@@ -2281,12 +2542,12 @@ script_mod! {
                                                     border_color_empty: #x00000000
                                                 }
                                                 draw_text +: {
-                                                    color: #xffffffff
-                                                    color_hover: #xffffffff
-                                                    color_focus: #xffffffff
-                                                    color_empty: #xB3B3B3
-                                                    color_empty_hover: #xB3B3B3
-                                                    color_empty_focus: #xB3B3B3
+                                                    color: #(palette().fg)
+                                                    color_hover: #(palette().fg)
+                                                    color_focus: #(palette().fg)
+                                                    color_empty: #(palette().muted_fg)
+                                                    color_empty_hover: #(palette().muted_fg)
+                                                    color_empty_focus: #(palette().muted_fg)
                                                     text_style: theme.font_regular{font_size: 14}
                                                 }
                                             }
@@ -2305,7 +2566,7 @@ script_mod! {
                                                     color: #xffffffff
                                                     color_hover: #xffffffff
                                                     color_down: #xffffffff
-                                                    color_disabled: #xB3B3B380
+                                                    color_disabled: #(palette().disabled_fg)
                                                     text_style: theme.font_bold{font_size: 18}
                                                 }
                                                 draw_bg +: {
@@ -2315,8 +2576,8 @@ script_mod! {
                                                     color_hover: #xe86a6a
                                                     color_down: #xe86a6a
                                                     color_focus: #xF38181
-                                                    // 禁用：深灰底 + 半透明，近似网页版的 opacity .5
-                                                    color_disabled: #x26262680
+                                                    // 禁用：muted 底 + 半透明，近似网页版的 opacity .5
+                                                    color_disabled: #(palette().disabled_bg)
                                                     border_color: #x00000000
                                                     border_color_hover: #x00000000
                                                     border_color_down: #x00000000
@@ -2349,7 +2610,7 @@ script_mod! {
                                     align: Align{x: 0.5}
                                     text: "按 Enter 发送，Shift + Enter 换行"
                                     draw_text +: {
-                                        color: #xB3B3B3
+                                        color: #(palette().muted_fg)
                                         text_style: theme.font_regular{font_size: 12}
                                     }
                                 }
@@ -2375,7 +2636,7 @@ script_mod! {
                                     spacing: 10.
                                     padding: Inset{left: 20 top: 16 right: 20 bottom: 16}
                                     show_bg: true
-                                    draw_bg.color: #x2b2b35
+                                    draw_bg.color: #(palette().card)
                                     draw_bg.border_radius: uniform(16.)
 
                                     title := Label {
@@ -2383,7 +2644,7 @@ script_mod! {
                                         height: Fit
                                         text: "确认清空聊天记录？"
                                         draw_text +: {
-                                            color: #xffffffff
+                                            color: #(palette().fg)
                                             text_style: theme.font_bold{font_size: 15}
                                         }
                                     }
@@ -2393,7 +2654,7 @@ script_mod! {
                                         height: Fit
                                         text: "此操作将永久删除所有聊天记录，此操作不可撤销。"
                                         draw_text +: {
-                                            color: #x9a9aa5
+                                            color: #(palette().muted_fg)
                                             text_style: theme.font_regular{font_size: 12}
                                         }
                                     }
@@ -2409,6 +2670,8 @@ script_mod! {
                                             text: "取消"
                                             width: 72
                                             height: 36
+                                            // 默认白字在浅色玻璃上不可读；跟随当前模式正文色
+                                            draw_text +: { color: #(palette().fg) }
                                         }
 
                                         confirm_clear_button := glass.GlassButtonProminent {
@@ -2417,6 +2680,8 @@ script_mod! {
                                             height: 36
                                             // 警示红：GlassButton 没有 destructive 变体，靠 tint 自己调
                                             draw_glass +: { tint: vec4(0.85, 0.24, 0.20, 0.40) }
+                                            // 深色模式白字 / 浅色模式深字（红 tint 叠在白玻璃上）
+                                            draw_text +: { color: #(palette().fg) }
                                         }
                                     }
                                 }
@@ -2432,8 +2697,8 @@ script_mod! {
                             align: Align{x: 1.0, y: 0.0}
                             bg_view +: {
                                 draw_bg +: {
-                                    // 规格 §5：rgba(0,0,0,0.5)；Makepad 没有 backdrop blur
-                                    color: #x00000080
+                                    // 深色 rgba(0,0,0,0.5) / 浅色 rgba(0,0,0,0.3)
+                                    color: #(palette().mask)
                                 }
                             }
                             content +: {
@@ -2446,10 +2711,10 @@ script_mod! {
                                     height: Fill
                                     flow: Down
                                     show_bg: true
-                                    // rgba(26,26,26,0.8)
-                                    draw_bg.color: #x1a1a1acc
+                                    // 深色 rgba(26,26,26,0.8) / 浅色 rgba(255,255,255,0.8)
+                                    draw_bg.color: #(palette().glass)
                                     draw_bg.border_size: 1.0
-                                    draw_bg.border_color: #xffffff1a
+                                    draw_bg.border_color: #(palette().glass_border)
                                     draw_bg.border_radius: uniform(0.)
 
                                     // 头部：标题 18px + 关闭按钮（§5）
@@ -2469,7 +2734,7 @@ script_mod! {
                                             padding: 0
                                             text: "设置"
                                             draw_text +: {
-                                                color: #xffffffff
+                                                color: #(palette().fg)
                                                 text_style: theme.font_bold{font_size: 18}
                                             }
                                         }
@@ -2482,16 +2747,16 @@ script_mod! {
                                             height: 28
                                             padding: 0
                                             draw_text +: {
-                                                color: #xB3B3B3
-                                                color_hover: #xffffffff
+                                                color: #(palette().muted_fg)
+                                                color_hover: #(palette().fg)
                                                 text_style: theme.font_regular{font_size: 18}
                                             }
                                             draw_bg +: {
                                                 border_size: 0.0
                                                 border_radius: uniform(12.0)
                                                 color: #x00000000
-                                                color_hover: #x262626
-                                                color_down: #x333333
+                                                color_hover: #(palette().hover)
+                                                color_down: #(palette().hover_down)
                                                 border_color: #x00000000
                                                 border_color_hover: #x00000000
                                                 border_color_down: #x00000000
@@ -2506,7 +2771,7 @@ script_mod! {
                                         width: Fill
                                         height: 1
                                         show_bg: true
-                                        draw_bg.color: #x333333
+                                        draw_bg.color: #(palette().border)
                                     }
 
                                     // 内容区：内距 16、段间 24
@@ -2548,21 +2813,21 @@ script_mod! {
                                                     padding: 0
                                                     text: "切换模型"
                                                     draw_text +: {
-                                                        color: #xffffffff
+                                                        color: #(palette().fg)
                                                         text_style: theme.font_regular{font_size: 14}
                                                     }
                                                 }
                                             }
 
-                                            // 触发器：36 高、圆角 10、1px 边框、底 rgba(38,38,38,0.5)
+                                            // 触发器：36 高、圆角 10、1px 边框、底 muted/50
                                             RoundedView {
                                                 width: Fill
                                                 height: 36
                                                 flow: Overlay
                                                 show_bg: true
-                                                draw_bg.color: #x26262680
+                                                draw_bg.color: #(palette().row_bg)
                                                 draw_bg.border_size: 1.0
-                                                draw_bg.border_color: #xffffff1a
+                                                draw_bg.border_color: #(palette().glass_border)
                                                 draw_bg.border_radius: uniform(10.)
 
                                                 View {
@@ -2581,7 +2846,7 @@ script_mod! {
                                                         text_overflow: Ellipsis
                                                         text: "Qwen3.8-Flash"
                                                         draw_text +: {
-                                                            color: #xffffffff
+                                                            color: #(palette().fg)
                                                             text_style: theme.font_regular{font_size: 14}
                                                         }
                                                     }
@@ -2592,7 +2857,7 @@ script_mod! {
                                                         padding: 0
                                                         text: "▼"
                                                         draw_text +: {
-                                                            color: #xB3B3B3
+                                                            color: #(palette().muted_fg)
                                                             text_style: theme.font_regular{font_size: 14}
                                                         }
                                                     }
@@ -2617,8 +2882,8 @@ script_mod! {
                                                         border_size: 0.0
                                                         border_radius: uniform(10.)
                                                         color: #x00000000
-                                                        color_hover: #xffffff0d
-                                                        color_down: #xffffff1a
+                                                        color_hover: #(palette().tint_hover)
+                                                        color_down: #(palette().tint_down)
                                                         color_focus: #x00000000
                                                         color_disabled: #x00000000
                                                         color_2: #x00000000
@@ -2635,7 +2900,7 @@ script_mod! {
                                                 }
                                             }
 
-                                            // 模型列表（§6）：容器底 #1A1A1A、圆角 10、1px #333。
+                                            // 模型列表（§6）：容器底 card、圆角 10、1px border。
                                             // 显隐与高度由 Rust 侧 `set_models_open` 管：
                                             // visible:false 在 Makepad 里仍占布局，必须同时把高度压成 0。
                                             model_list_box := RoundedView {
@@ -2645,9 +2910,9 @@ script_mod! {
                                                 flow: Down
                                                 padding: Inset{left: 0 top: 4 right: 0 bottom: 4}
                                                 show_bg: true
-                                                draw_bg.color: #x1A1A1A
+                                                draw_bg.color: #(palette().model_list_bg)
                                                 draw_bg.border_size: 1.0
-                                                draw_bg.border_color: #x333333
+                                                draw_bg.border_color: #(palette().border)
                                                 draw_bg.border_radius: uniform(10.)
 
                                                 model_list := ModelList {
@@ -2669,7 +2934,7 @@ script_mod! {
                                                     padding: 0
                                                     text: "当前: Qwen3.8-Flash"
                                                     draw_text +: {
-                                                        color: #xB3B3B3
+                                                        color: #(palette().muted_fg)
                                                         text_style: theme.font_regular{font_size: 12}
                                                     }
                                                 }
@@ -2715,7 +2980,7 @@ script_mod! {
                                             width: Fill
                                             height: 1
                                             show_bg: true
-                                            draw_bg.color: #x333333
+                                            draw_bg.color: #(palette().border)
                                         }
 
                                         // ── 第 2 段：更改头像（§5-2）
@@ -2750,7 +3015,7 @@ script_mod! {
                                                     padding: 0
                                                     text: "更改头像"
                                                     draw_text +: {
-                                                        color: #xffffffff
+                                                        color: #(palette().fg)
                                                         text_style: theme.font_regular{font_size: 14}
                                                     }
                                                 }
@@ -2797,7 +3062,7 @@ script_mod! {
                                                     show_bg: true
                                                     draw_bg.color: #x00000000
                                                     draw_bg.border_size: 1.0
-                                                    draw_bg.border_color: #xffffff1a
+                                                    draw_bg.border_color: #(palette().glass_border)
                                                     draw_bg.border_radius: uniform(10.)
 
                                                     View {
@@ -2813,7 +3078,7 @@ script_mod! {
                                                             padding: 0
                                                             text: "↑"
                                                             draw_text +: {
-                                                                color: #xffffffff
+                                                                color: #(palette().fg)
                                                                 text_style: theme.font_regular{font_size: 16}
                                                             }
                                                         }
@@ -2824,7 +3089,7 @@ script_mod! {
                                                             padding: 0
                                                             text: "上传头像"
                                                             draw_text +: {
-                                                                color: #xffffffff
+                                                                color: #(palette().fg)
                                                                 text_style: theme.font_regular{font_size: 14}
                                                             }
                                                         }
@@ -2847,8 +3112,8 @@ script_mod! {
                                                             border_size: 0.0
                                                             border_radius: uniform(10.)
                                                             color: #x00000000
-                                                            color_hover: #xffffff0d
-                                                            color_down: #xffffff1a
+                                                            color_hover: #(palette().tint_hover)
+                                                            color_down: #(palette().tint_down)
                                                             color_focus: #x00000000
                                                             color_disabled: #x00000000
                                                             color_2: #x00000000
@@ -2872,18 +3137,126 @@ script_mod! {
                                             width: Fill
                                             height: 1
                                             show_bg: true
-                                            draw_bg.color: #x333333
+                                            draw_bg.color: #(palette().border)
                                         }
 
-                                        // 深浅色模式仍是占位（下轮做）
-                                        Label {
+                                        // ── 第 3 段：深色/浅色模式（§5-3）
+                                        View {
                                             width: Fill
                                             height: Fit
-                                            padding: 0
-                                            text: "深色 / 浅色模式（下轮实现）"
-                                            draw_text +: {
-                                                color: #xB3B3B3
-                                                text_style: theme.font_regular{font_size: 14}
+                                            flow: Down
+                                            spacing: 8.
+
+                                            // 分区标题：16px 黄色月亮/太阳 + 14px 文字
+                                            View {
+                                                width: Fill
+                                                height: Fit
+                                                flow: Right
+                                                spacing: 8.
+                                                align: Align{y: 0.5}
+
+                                                theme_mode_icon := Label {
+                                                    width: Fit
+                                                    height: Fit
+                                                    padding: 0
+                                                    text: ""
+                                                    draw_text +: {
+                                                        color: #xFCE38A
+                                                        text_style: theme.font_regular{font_size: 16}
+                                                    }
+                                                }
+
+                                                Label {
+                                                    width: Fit
+                                                    height: Fit
+                                                    padding: 0
+                                                    text: "深色/浅色模式"
+                                                    draw_text +: {
+                                                        color: #(palette().fg)
+                                                        text_style: theme.font_regular{font_size: 14}
+                                                    }
+                                                }
+                                            }
+
+                                            // 一行底：muted/50、圆角 12、内距 12（规格 §5-3）
+                                            RoundedView {
+                                                width: Fill
+                                                height: Fit
+                                                flow: Right
+                                                align: Align{y: 0.5}
+                                                padding: Inset{left: 12 top: 12 right: 12 bottom: 12}
+                                                show_bg: true
+                                                draw_bg.color: #(palette().row_bg)
+                                                draw_bg.border_radius: uniform(12.)
+
+                                                theme_mode_label := Label {
+                                                    width: Fit
+                                                    height: Fit
+                                                    padding: 0
+                                                    text: ""
+                                                    draw_text +: {
+                                                        color: #(palette().fg)
+                                                        text_style: theme.font_regular{font_size: 14}
+                                                    }
+                                                }
+
+                                                View { width: Fill height: 1 }
+
+                                                // 开关：轨道 32×18.4、圆角 full、滑块 16 圆。
+                                                // 深色=开（珊瑚轨道、黑滑块），浅色=关（深灰轨道、白滑块）。
+                                                theme_track := RoundedView {
+                                                    width: 32
+                                                    height: 18.4
+                                                    flow: Overlay
+                                                    align: Align{x: 0.0, y: 0.0}
+                                                    show_bg: true
+                                                    draw_bg.color: #(palette().switch_track)
+                                                    draw_bg.border_radius: uniform(9.2)
+
+                                                    theme_knob := RoundedView {
+                                                        width: 16
+                                                        height: 16
+                                                        margin: Inset{left: #(switch_knob_left()), top: 1.2}
+                                                        show_bg: true
+                                                        draw_bg.color: #(palette().switch_knob)
+                                                        draw_bg.border_radius: uniform(8.)
+                                                    }
+
+                                                    // 透明按钮盖在整条轨道上，只负责命中与手型
+                                                    theme_toggle_button := ButtonFlat {
+                                                        width: Fill
+                                                        height: Fill
+                                                        margin: 0
+                                                        padding: 0
+                                                        text: ""
+                                                        draw_text +: {
+                                                            color: #x00000000
+                                                            color_hover: #x00000000
+                                                            color_down: #x00000000
+                                                            color_focus: #x00000000
+                                                            color_disabled: #x00000000
+                                                        }
+                                                        draw_bg +: {
+                                                            border_size: 0.0
+                                                            border_radius: uniform(9.2)
+                                                            color: #x00000000
+                                                            color_hover: #x00000000
+                                                            color_down: #x00000000
+                                                            color_focus: #x00000000
+                                                            color_disabled: #x00000000
+                                                            color_2: #x00000000
+                                                            color_2_hover: #x00000000
+                                                            color_2_down: #x00000000
+                                                            color_2_focus: #x00000000
+                                                            color_2_disabled: #x00000000
+                                                            border_color: #x00000000
+                                                            border_color_hover: #x00000000
+                                                            border_color_down: #x00000000
+                                                            border_color_focus: #x00000000
+                                                            border_color_disabled: #x00000000
+                                                        }
+                                                    }
+                                                }
                                             }
                                         }
                                     }

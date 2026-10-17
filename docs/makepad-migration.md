@@ -565,7 +565,7 @@ UI 不另存一份。选中态由 `static MODEL_ID: RwLock<&'static str>` 驱动
 6. 颜色仍是 RRGGBBAA：薄荷 20% 是 `#x95E1D333`，玻璃底是 `#x1a1a1acc`。
 
 与规格的差异：无滑出动画（静态贴右）、无 backdrop blur（Makepad 没有）、
-图标用文字字形（▼ / × / ⇄ / 👁）、深浅色模式仍是标题占位（头像上传见 §17）。
+图标用文字字形（▼ / × / ⇄ / 👁）、深浅色模式仍是标题占位（§18 已实现）。
 
 ## 17. 更改头像与持久化（2026-10-17，已实装）
 
@@ -597,3 +597,88 @@ UI 不另存一份。选中态由 `static MODEL_ID: RwLock<&'static str>` 驱动
    §15-1 的清单写，别混入 `top_glint` / `inner_shadow`。
 5. 预览图与顶栏图都是 `Image`：`fit: ImageFit.CropToFill`、`draw_bg.border_radius`
    裁圆；没有图时 `set_visible(false)`，不要留空纹理占位。
+
+## 18. 深色/浅色模式与持久化（2026-10-17，已实装）
+
+抽屉 §5-3：一行 `muted/50` 底、圆角 12、内距 12；左侧文字随模式变
+「深色模式」/「浅色模式」，右侧开关轨道 32×18.4、滑块 16 圆（深色=开：
+`#F18484` 轨道 + 黑滑块；浅色=关：`#262626` 轨道 + 白滑块）。
+点整条轨道即可切换（透明 `ButtonFlat` 覆盖命中）。
+
+### 18.1 切换机制（从源码确认）
+
+Makepad 自带一条运行期换主题的通路，外部应用可以直接复用：
+
+- `desktop_style::handle_event(cx, &Event::Custom(sheet.to_json()))`
+  （`widgets/core/src/desktop_style.rs:303-319`）解析 `makepad_style` 信封，
+  在 VM 里 `install()` 新 sheet，变化时调 `cx.request_style_reload()`。
+- `request_style_reload()`（`platform/src/cx_api.rs:680-683`）置
+  `pending_style_reload` + `pending_live_edit_request`。
+- 事件循环随后投递 `Event::LiveEdit`；`app_main!` 的处理器
+  （`platform/src/app_main.rs:327-348`）看到 `pending_style_reload` 时用
+  `Apply::ScriptReapply` 重新执行 `AppMain::script_mod` 并重贴整棵部件树。
+  `ScriptReapply` 会保留运行期 setter 写入的文字（输入框内容、我们的
+  「深色模式/浅色模式」标签），也会保留动画。**这条通路可用**，
+  参考实现：`apps/clock/src/main.rs:167-180`、`apps/weather/src/main.rs:187-200`
+  （它们只是自己构造 `StyleSheet::load_with_appearance(...)` 再投递给
+  `desktop_style::handle_event`）。
+
+关键点：`AppMain::script_mod` 每次重载都会重跑，所以安装 sheet 的那一行必须
+读当前模式（本项目用 `theme_stylesheet(theme_mode())`），不能写死
+`BlackOrange`，否则 `handle_event` 装好的浅色 sheet 会被下一次重载盖回去。
+
+`DesktopStyle` 没有 Light 变体（`desktop_style.rs:8-20`）；深色继续用
+`BlackOrange`，浅色借 `DesktopStyle::Windows` 的 `mod.themes.light`
+（`widgets/themes/windows/theme.splash:1`，令牌表在
+`widgets/core/src/theme_desktop_light.rs`）。主题只负责 Markdown 正文、
+Markdown 链接/行内代码、TextInput 光标与选区、GlassButton 这类主题驱动的部件；
+界面自己的颜色全部由 Rust 的 `Palette` 两套值逐项覆盖。
+
+### 18.2 颜色与持久化
+
+`Palette`（`decem-makepad/src/main.rs` 顶部）把原来写死的深色全部成对给出浅色值：
+根背景/clear `#000000 → #F2F2F2`、顶栏与抽屉玻璃 `rgba(26,26,26,.8) →
+rgba(255,255,255,.8)`、char 气泡 `#1A1A1A → #FFFFFF`、输入区
+`rgba(20,20,20,.8) → background/80`、胶囊 `rgba(38,38,38,.5) → muted/50`、
+正文 `#FFF → #1A1A1A`、次级文字 `#B3B3B3 → #666666`、分隔线
+`#333 → #D9D9D9`、遮罩 `rgba(0,0,0,.5) → rgba(0,0,0,.3)`。
+用户气泡保持珊瑚渐变，并把 Markdown 正文/`font_color` 钉成白色；
+代码块保持深色（与网页版一致）。
+
+持久化：`%APPDATA%\DecemChat\theme`，内容 `dark\n` / `light\n`（与头像同目录）。
+启动优先级：`DECEM_THEME=light|dark` > 文件 > 深色。环境变量**不落盘**，
+只覆盖本次运行，避免自动化改掉用户选择。
+
+### 18.3 这次现踩的坑
+
+1. **`#xRRGGBBAA` 的字节序不能想当然。** Rust 侧 `rgba(hex)` 若按
+   `0xAARRGGBB` 拆，`0x000000FF` 会变成「蓝色 + alpha 0」；窗口 clear 色
+   忽略 alpha，整个界面会变成纯蓝。正确拆法是
+   `r=(hex>>24), g=(hex>>16), b=(hex>>8), a=hex`。
+2. **`GlassButton` 的文字默认是白色**（`glass_panel.rs:257`），不跟随
+   light theme。浅色玻璃上必须显式给 `draw_text.color`：重新生成用珊瑚，
+   确认弹层的两个按钮用当前模式的正文色。
+3. **`ScriptReapply` 会保留字符串字段。** `ArcStringMut::script_apply`
+   在 `preserves_runtime_state()` 时直接返回（`platform/src/arc_string_mut.rs:100-105`），
+   所以开关两侧的文字要用 Rust `set_text` 写（首帧、打开抽屉、切换时各一次），
+   不能只靠脚本里的字符串插值。
+4. **自带字体缺 `☾`/`☀`**，会显示豆腐块。图标改用 emoji `🌙` / `☀️`
+   （与 ✨/🦊 同一套字形）。
+5. 浅色下模型列表/抽屉的**文字是 Rust 每帧写的**（`ModelRow::draw_walk`），
+   那里也要读 `palette()`，否则行文字仍是白色（白底白字）。
+
+### 18.4 验证
+
+- `cargo check`、`cargo clippy --release --all-targets -- -D warnings`、
+  `cargo build --release`、`cargo fmt --check` 全绿。
+- `DECEM_THEME=light` / `dark` 各启动 8 秒后结束，日志均无 `[E]`。
+- 截图 + PowerShell `System.Drawing` 采像素：
+  浅色空背景 `#F2F2F2`、顶栏玻璃 `#FCFCFC`、char 气泡 `#FFFFFF`、
+  输入胶囊 `#ECECEC`；切到深色后背景 `#000000`、顶栏 `#151515`、
+  char 气泡 `#1A1A1A`、输入胶囊 `#1B1B1B`。
+- 切换后输入框里的文字保留；点击输入框可输入，Enter 发送、SSE 流式回答正常。
+  重启（不带环境变量）后仍是上次的模式。
+
+已知限制：浅色主题借用 Windows 的 token 表（字号/间距等非颜色令牌与深色
+略有差异）；没有 backdrop blur；代码块在浅色下仍是 tokyo-night 深色
+（与网页版一致）；`GlassButton` 的玻璃折射效果在浅色下偏白，但文字已保证可读。
