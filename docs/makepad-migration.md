@@ -463,3 +463,27 @@ ImageFit::Smallest => {
 
 附带踩到的坑：`new_batch: true` 不要加在 `Modal` 的卡片上——实测按 Esc 关闭后
 卡片与文字消失、按钮残留（overlay 复用了旧批次）；去掉即正常。
+
+## 14. 本地时间不能靠 `makepad_platform::windows`（2026-10-17）
+
+`makepad_platform` 确实 re-export 了 `windows` crate（`platform/src/lib.rs:169-170`），
+但它的 `windows` 依赖**没有开 `Win32_System_Time` feature**
+（`platform/Cargo.toml:141-188` 的 feature 列表里没有），
+所以 `windows::Win32::System::Time::{GetLocalTime, GetTimeZoneInformation}` 在应用侧根本不存在。
+给依赖补 feature 会改整个 `windows` 的编译图（`platform/Cargo.toml:136-140` 的注释就是为此写的），
+为一行时间戳不值得。
+
+✅ 做法与 Makepad 自己的 `tools/makepad_builder/src/tui.rs:2649-2657` 一致：
+自己声明 extern，不引入新依赖：
+
+```rust
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetLocalTime(time: *mut [u16; 8]); // SYSTEMTIME
+}
+```
+
+另外，消息头像用的是 `Image` 自带的面片圆角
+（`widgets/core/src/image.rs:289-296` 的 `border_radius` + `:207-224` 的像素路径），
+把它放在固定 40×40 的 `RoundedView`（2px 描边）里即可裁成圆；
+`Image` 仍要用 `width/height: Fill` 填满内框，**不要再写 `Fit`**（NaN 坑见 §12）。

@@ -24,7 +24,7 @@ use decem_core::{
 use makepad_base64::{base64_encode, BASE64_STANDARD};
 
 use std::path::Path;
-use std::sync::{mpsc, Arc, RwLock};
+use std::sync::{mpsc, Arc, OnceLock, RwLock};
 use std::time::Duration;
 
 app_main!(App);
@@ -50,6 +50,38 @@ struct Msg {
     role: Role,
     text: String,
     image: Option<ImageAttachment>,
+    /// 本地时间 `HH:MM`，在消息创建时定格（网页版同样是消息生成那一刻的时间）。
+    time: String,
+}
+
+/// 当前本地时间，24 小时制 `HH:MM`。
+///
+/// Windows 上直接调 kernel32 的 `GetLocalTime`（和 Makepad 自己的
+/// `tools/makepad_builder/src/tui.rs:2651-2655` 同一个写法）：
+/// `makepad_platform` 虽然 re-export 了 `windows` crate（`platform/src/lib.rs:169-170`），
+/// 但它没有开 `Win32_System_Time` feature，拿不到 `GetLocalTime` 绑定；
+/// 自己声明 extern 不引入任何新依赖。非 Windows 退回 UTC（本项目只发 Windows 包）。
+fn now_hhmm() -> String {
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        extern "system" {
+            // SYSTEMTIME: year, month, day_of_week, day, hour, minute, second, ms
+            fn GetLocalTime(time: *mut [u16; 8]);
+        }
+        let mut time = [0u16; 8];
+        // SAFETY: GetLocalTime 会在指针处写满 8 个 u16，和 SYSTEMTIME 的内存布局一致
+        unsafe { GetLocalTime(&mut time) };
+        format!("{:02}:{:02}", time[4], time[5])
+    }
+    #[cfg(not(windows))]
+    {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs())
+            .unwrap_or(0);
+        format!("{:02}:{:02}", (secs / 3600) % 24, (secs / 60) % 60)
+    }
 }
 
 /// 全局聊天状态（照 aichat 的做法：`ChatList` 要在 `draw_walk` 里读它）。
@@ -77,7 +109,42 @@ fn push_message(text: String) {
         role: Role::Char,
         text,
         image: None,
+        time: now_hhmm(),
     });
+}
+
+/// 头像图片只在第一次用到时读盘一次（两种角色各一份）。
+/// 路径先试进程 cwd 下的 `public/images`，再试仓库根目录的 `../public/images`。
+fn read_avatar(name: &str) -> Option<Vec<u8>> {
+    ["public/images/", "../public/images/"]
+        .iter()
+        .find_map(|prefix| std::fs::read(format!("{prefix}{name}")).ok())
+}
+
+static CHAR_AVATAR: OnceLock<Option<Vec<u8>>> = OnceLock::new();
+static USER_AVATAR: OnceLock<Option<Vec<u8>>> = OnceLock::new();
+
+/// 读不到的返回 `None` —— 调用方只画头像环，不报错也不重试。
+fn avatar_bytes(role: Role) -> Option<&'static [u8]> {
+    let (slot, name) = match role {
+        Role::User => (&USER_AVATAR, "user_01.jpg"),
+        Role::Char => (&CHAR_AVATAR, "char_01.jpg"),
+    };
+    slot.get_or_init(|| read_avatar(name)).as_deref()
+}
+
+/// 把头像图贴进某一条消息的头像框。**只在部件新建时调**：
+/// `load_image_from_data` 每次都会真解码，而列表每帧都会重绘。
+fn load_item_avatar(cx: &mut Cx, item: &WidgetRef, role: Role) {
+    let photo = item.image(cx, ids!(avatar_photo));
+    match avatar_bytes(role) {
+        Some(bytes) => {
+            photo.set_visible(cx, true);
+            // 解码失败（文件损坏）就只剩环，不打断绘制
+            let _ = photo.load_image_from_data(cx, bytes);
+        }
+        None => photo.set_visible(cx, false),
+    }
 }
 
 /// 单张图的上限。服务端把请求体放宽到 20MB，这里留足余量。
@@ -433,7 +500,16 @@ impl Widget for ChatList {
                         if just_started {
                             self.animating = Some(item_id);
                         }
-                        let (item_widget, _) = list.item_with_existed(cx, item_id, id!(Char));
+                        let (item_widget, existed) = list.item_with_existed(cx, item_id, id!(Char));
+                        if !existed {
+                            // 流式那条没有 Msg，但头像仍然是 char 的
+                            load_item_avatar(cx, &item_widget, Role::Char);
+                        }
+                        // 流式中不显示时间戳与「重新生成」
+                        item_widget
+                            .glass_button(cx, ids!(regen_button))
+                            .set_visible(cx, false);
+                        item_widget.label(cx, ids!(time)).set_text(cx, "");
                         let text = if chat.streaming.is_empty() {
                             "..."
                         } else {
@@ -470,6 +546,8 @@ impl Widget for ChatList {
                         item_widget
                             .glass_button(cx, ids!(regen_button))
                             .set_visible(cx, show_regen);
+                        // 时间戳在气泡下方、内容列里；用户侧只有时间戳
+                        item_widget.label(cx, ids!(time)).set_text(cx, &msg.time);
                         let mut markdown = item_widget.markdown(cx, ids!(selectable));
                         markdown.set_text(cx, &msg.text);
                         if was_animating {
@@ -479,6 +557,10 @@ impl Widget for ChatList {
                         // 而这条路径每帧都会跑到，无条件调就是每帧重解码。`existed` 帮我们
                         // 分清「新建」和「复用」；部件被回收后再滚回来会重建，于是自然重解一次。
                         // 一条消息的图不会变，所以显隐也在这里一次性设好。
+                        if !existed {
+                            // 头像与消息图片都只在新建时解码一次
+                            load_item_avatar(cx, &item_widget, msg.role);
+                        }
                         if !existed && msg.role == Role::User {
                             let photo = item_widget.image(cx, ids!(photo));
                             match &msg.image {
@@ -523,6 +605,9 @@ pub struct App {
     /// `DECEM_IMAGE` 启动钩子只查一次环境变量。
     #[rust]
     startup_image_checked: bool,
+    /// 顶栏头像只贴一次图。
+    #[rust]
+    avatars_loaded: bool,
 }
 
 /// 文件对话框的 id，用来认出哪个对话框回了话。
@@ -603,6 +688,22 @@ impl App {
         })
     }
 
+    /// 顶栏头像：部件只建一次，所以第一次事件时贴图即可。
+    fn load_header_avatar(&mut self, cx: &mut Cx) {
+        if self.avatars_loaded {
+            return;
+        }
+        self.avatars_loaded = true;
+        let photo = self.ui.image(cx, ids!(header_photo));
+        match avatar_bytes(Role::Char) {
+            Some(bytes) => {
+                photo.set_visible(cx, true);
+                let _ = photo.load_image_from_data(cx, bytes);
+            }
+            None => photo.set_visible(cx, false),
+        }
+    }
+
     /// 一次性启动钩子：`DECEM_IMAGE=<路径>` 时把这张图直接放进待发槽位。
     ///
     /// 存在的理由与 `DECEM_STRESS` 一样：系统文件对话框是**模态**窗口，
@@ -635,6 +736,7 @@ impl App {
                 role: Role::User,
                 text,
                 image,
+                time: now_hhmm(),
             });
             chat.streaming.clear();
             chat.is_streaming = true;
@@ -719,6 +821,7 @@ impl App {
                 role: Role::Char,
                 text: WELCOME.to_owned(),
                 image: None,
+                time: now_hhmm(),
             });
         }
         self.scroll_to_tail(cx, 1);
@@ -743,6 +846,7 @@ impl App {
                 role: Role::Char,
                 text,
                 image: None,
+                time: now_hhmm(),
             });
         }
         chat.is_streaming = false;
@@ -865,6 +969,7 @@ impl AppMain for App {
             role: Role::Char,
             text: WELCOME.to_owned(),
             image: None,
+            time: now_hhmm(),
         });
         // 压测：DECEM_STRESS=1 时塞几百条，观察长列表滚动
         if std::env::var("DECEM_STRESS").is_ok() {
@@ -876,6 +981,7 @@ impl AppMain for App {
                         "压测第 {i} 条：中文、全角标点？！～、emoji 🦊，以及一段用来观察换行的稍长文本。"
                     ),
                     image: None,
+                    time: now_hhmm(),
                 });
             }
         }
@@ -884,6 +990,7 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        self.load_header_avatar(cx);
         self.load_startup_image(cx);
         self.match_event(cx, event);
         if let Event::Actions(actions) = event {
@@ -912,6 +1019,29 @@ script_mod! {
         pad_x: 28.0
     }
 
+    // 消息两侧的圆头像（规格 §3）：40×40、2px 环、图片裁成圆。
+    // 环用 RoundedView 的描边；图片用 Image 自己的 `draw_bg.border_radius`
+    // 裁圆（image.rs:289-296 与 207-224）。图片读不到时 Rust 侧把 Image 隐藏，
+    // 只剩环 —— 不占位、不报错。
+    let MessageAvatar = RoundedView {
+        width: 40
+        height: 40
+        flow: Down
+        align: Center
+        padding: Inset{left: 2 top: 2 right: 2 bottom: 2}
+        show_bg: true
+        draw_bg.color: #x00000000
+        draw_bg.border_size: 2.0
+        draw_bg.border_radius: uniform(20.0)
+
+        avatar_photo := Image {
+            width: Fill
+            height: Fill
+            fit: ImageFit.CropToFill
+            draw_bg.border_radius: 18.0
+        }
+    }
+
     let ChatList = #(ChatList::register_widget(vm)) {
         width: Fill
         height: Fill
@@ -924,46 +1054,60 @@ script_mod! {
             smooth_tail: true
             reuse_items: false
 
-            // Decem 一侧：左对齐、深色气泡
+            // Decem 一侧：头像在左、气泡在右，两者顶对齐（规格 §3）。
+            // 第一行放头像与气泡，第二行放时间戳与「重新生成」。
             Char := View {
                 width: Fill
                 height: Fit
+                flow: Down
                 align: Align{x: 0.0}
                 padding: Inset{top: 6 bottom: 6 left: 4 right: 64}
 
-                bubble := Bubble {
-                    RoundedView {
-                        width: Fill
-                        height: Fit
-                        show_bg: true
-                        draw_bg.color: #x1a1a1a
-                        draw_bg.border_radius: uniform(16.)
-                        padding: Inset{left: 14 top: 10 right: 14 bottom: 10}
+                View {
+                    width: Fill
+                    height: Fit
+                    flow: Right
+                    align: Align{x: 0.0, y: 0.0}
+                    spacing: 12.
 
-                        selectable := Markdown {
-                            // 这里必须是 Fill：Bubble 已经把确定宽度给了外层，
-                            // Fill 才能拿到它并按它换行
+                    MessageAvatar {
+                        draw_bg.border_color: #x95E1D3
+                    }
+
+                    bubble := Bubble {
+                        RoundedView {
                             width: Fill
                             height: Fit
-                            body: ""
-                            use_code_block_widget: true
-                            use_math_widget: true
-                            code_block := View {
+                            show_bg: true
+                            draw_bg.color: #x1a1a1a
+                            draw_bg.border_radius: uniform(16.)
+                            padding: Inset{left: 14 top: 10 right: 14 bottom: 10}
+
+                            selectable := Markdown {
+                                // 这里必须是 Fill：Bubble 已经把确定宽度给了外层，
+                                // Fill 才能拿到它并按它换行
                                 width: Fill
                                 height: Fit
-                                // CodeView 的 walk 取自 editor 字段（code_view.rs:60-62），
-                                // 宽高与底色都要在 editor +: 里给，实例上写 width/height 会运行期报错。
-                                code_view := CodeView {
-                                    // 聊天里的代码块只读：光标不粘末尾、不响应输入
-                                    keep_cursor_at_end: false
-                                    editor +: {
-                                        height: Fit
-                                        // 只读（code_editor.rs:293）；行号 gutter 关掉（code_editor.rs:295），与网页版一致
-                                        read_only: true
-                                        show_gutter: false
-                                        // 底色与网页版 pre 一致：rgba(0,0,0,0.3)（MessageBubble.tsx 的 bg-black/30），
-                                        // 铺在气泡底色 #x1a1a1a 上约等于近黑
-                                        draw_bg +: { color: #x0000004D }
+                                body: ""
+                                use_code_block_widget: true
+                                use_math_widget: true
+                                code_block := View {
+                                    width: Fill
+                                    height: Fit
+                                    // CodeView 的 walk 取自 editor 字段（code_view.rs:60-62），
+                                    // 宽高与底色都要在 editor +: 里给，实例上写 width/height 会运行期报错。
+                                    code_view := CodeView {
+                                        // 聊天里的代码块只读：光标不粘末尾、不响应输入
+                                        keep_cursor_at_end: false
+                                        editor +: {
+                                            height: Fit
+                                            // 只读（code_editor.rs:293）；行号 gutter 关掉（code_editor.rs:295），与网页版一致
+                                            read_only: true
+                                            show_gutter: false
+                                            // 底色与网页版 pre 一致：rgba(0,0,0,0.3)（MessageBubble.tsx 的 bg-black/30），
+                                            // 铺在气泡底色 #x1a1a1a 上约等于近黑
+                                            draw_bg +: { color: #x0000004D }
+                                        }
                                     }
                                 }
                             }
@@ -971,16 +1115,39 @@ script_mod! {
                     }
                 }
 
-                // 「重新生成」：与网页版同位置——最后一条 char 气泡底部的文字按钮。
-                // 只在最后一条 char 消息上可见（流式时隐藏），
-                // 显隐由 ChatList::draw_walk 按项控制。
-                regen_button := glass.GlassButton {
-                    text: "重新生成"
-                    width: Fit
-                    height: 30
-                    padding: Inset{left: 12 right: 12 top: 0 bottom: 0}
-                    // 淡珊瑚：与用户气泡的珊瑚（#F38181）同族，提示这是对最后一段问答的操作
-                    draw_glass +: { tint: vec4(0.95, 0.51, 0.51, 0.18) }
+                // 时间戳在气泡**下方**（规格 §3）。左缩进 52 = 头像 40 + 间距 12，
+                // 让时间戳与气泡左缘对齐；char 侧与「重新生成」同行。
+                View {
+                    width: Fill
+                    height: Fit
+                    flow: Right
+                    spacing: 8.
+                    align: Align{x: 0.0, y: 0.5}
+                    padding: Inset{left: 52 top: 4}
+
+                    time := Label {
+                        width: Fit
+                        height: Fit
+                        // 去掉 Label 默认内距，时间戳才与气泡边缘对齐
+                        padding: 0
+                        text: ""
+                        draw_text +: {
+                            color: #xB3B3B3
+                            text_style: theme.font_regular{font_size: 12}
+                        }
+                    }
+
+                    // 「重新生成」：最后一条 char 气泡底部的文字按钮。
+                    // 只在最后一条 char 消息上可见（流式时隐藏），
+                    // 显隐由 ChatList::draw_walk 按项控制。
+                    regen_button := glass.GlassButton {
+                        text: "重新生成"
+                        width: Fit
+                        height: 30
+                        padding: Inset{left: 12 right: 12 top: 0 bottom: 0}
+                        // 淡珊瑚：与用户气泡的珊瑚（#F38181）同族，提示这是对最后一段问答的操作
+                        draw_glass +: { tint: vec4(0.95, 0.51, 0.51, 0.18) }
+                    }
                 }
             }
 
@@ -991,35 +1158,70 @@ script_mod! {
             User := View {
                 width: Fill
                 height: Fit
+                flow: Down
                 align: Align{x: 1.0}
                 padding: Inset{top: 6 bottom: 6 left: 64 right: 4}
 
-                bubble := Bubble {
-                    RoundedView {
-                        width: Fill
-                        height: Fit
-                        flow: Down
-                        show_bg: true
-                        draw_bg.color: #xF38181
-                        draw_bg.color_2: #xe86a6a
-                        draw_bg.border_radius: uniform(16.)
-                        padding: Inset{left: 14 top: 10 right: 14 bottom: 10}
+                View {
+                    width: Fill
+                    height: Fit
+                    flow: Right
+                    align: Align{x: 1.0, y: 0.0}
+                    spacing: 12.
 
-                        // 用户发的图。没有纹理时高度收成 0、不占位。
-                        // 宽度必须是 Fill：`Image` 在 Fit 宽度下会占住位置却不画纹理。
-                        // 另外 `Image` **没有 align 属性**，写了会在运行时脚本报错（编译期不报），
-                        // 所以图是左对齐的，特别竖长的图右侧会留白。
-                        photo := Image {
+                    bubble := Bubble {
+                        RoundedView {
                             width: Fill
                             height: Fit
-                            max_height: FitBound.Abs(320)
-                            fit: ImageFit.Smallest
+                            flow: Down
+                            show_bg: true
+                            draw_bg.color: #xF38181
+                            draw_bg.color_2: #xe86a6a
+                            draw_bg.border_radius: uniform(16.)
+                            padding: Inset{left: 14 top: 10 right: 14 bottom: 10}
+
+                            // 用户发的图。没有纹理时高度收成 0、不占位。
+                            // 宽度必须是 Fill：`Image` 在 Fit 宽度下会占住位置却不画纹理。
+                            // 另外 `Image` **没有 align 属性**，写了会在运行时脚本报错（编译期不报），
+                            // 所以图是左对齐的，特别竖长的图右侧会留白。
+                            photo := Image {
+                                width: Fill
+                                height: Fit
+                                max_height: FitBound.Abs(320)
+                                fit: ImageFit.Smallest
+                            }
+
+                            selectable := Markdown {
+                                width: Fill
+                                height: Fit
+                                body: ""
+                            }
                         }
+                    }
 
-                        selectable := Markdown {
-                            width: Fill
-                            height: Fit
-                            body: ""
+                    MessageAvatar {
+                        draw_bg.border_color: #xF38181
+                    }
+                }
+
+                // 用户侧只有时间戳（没有「重新生成」）。右缩进 52 与头像列对齐，
+                // 让时间戳贴住气泡右缘。
+                View {
+                    width: Fill
+                    height: Fit
+                    flow: Right
+                    align: Align{x: 1.0, y: 0.5}
+                    padding: Inset{right: 52 top: 4}
+
+                    time := Label {
+                        width: Fit
+                        height: Fit
+                        // 去掉 Label 默认内距，时间戳才与气泡边缘对齐
+                        padding: 0
+                        text: ""
+                        draw_text +: {
+                            color: #xB3B3B3
+                            text_style: theme.font_regular{font_size: 12}
                         }
                     }
                 }
@@ -1045,10 +1247,210 @@ script_mod! {
                         width: Fill
                         height: Fill
                         flow: Down
-                        spacing: 10.
-                        padding: Inset{left: 14 top: 10 right: 14 bottom: 12}
+                        spacing: 0.
+                        padding: 0
                         show_bg: true
                         draw_bg.color: #x000000
+
+                        // ── 顶栏（规格 §2，高 65 = 64 内容 + 1 底边）
+                        // 全宽；玻璃底只用半透明色模拟（Makepad 没有 backdrop blur）。
+                        View {
+                            width: Fill
+                            height: Fit
+                            flow: Down
+
+                            RoundedView {
+                                width: Fill
+                                height: 64
+                                flow: Right
+                                align: Align{y: 0.5}
+                                padding: Inset{left: 16 top: 12 right: 16 bottom: 12}
+                                show_bg: true
+                                // rgba(26,26,26,0.8)
+                                draw_bg.color: #x1a1a1acc
+                                draw_bg.border_radius: uniform(0.0)
+
+                                View {
+                                    width: Fit
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 12.
+                                    align: Align{y: 0.5}
+
+                                    // 40×40 头像 + 2px 薄荷环 + 右下角在线点
+                                    View {
+                                        width: 40
+                                        height: 40
+                                        flow: Overlay
+                                        align: Align{x: 0.0, y: 0.0}
+
+                                        RoundedView {
+                                            width: 40
+                                            height: 40
+                                            flow: Down
+                                            align: Center
+                                            padding: Inset{left: 2 top: 2 right: 2 bottom: 2}
+                                            show_bg: true
+                                            draw_bg.color: #x00000000
+                                            draw_bg.border_size: 2.0
+                                            draw_bg.border_color: #x95E1D3
+                                            draw_bg.border_radius: uniform(20.0)
+
+                                            header_photo := Image {
+                                                width: Fill
+                                                height: Fill
+                                                fit: ImageFit.CropToFill
+                                                draw_bg.border_radius: 18.0
+                                            }
+                                        }
+
+                                        // 12×12 在线绿 + 2px 黑边（规格 §2）
+                                        RoundedView {
+                                            width: 12
+                                            height: 12
+                                            margin: Inset{left: 28 top: 28}
+                                            show_bg: true
+                                            draw_bg.color: #x22C55E
+                                            draw_bg.border_size: 2.0
+                                            draw_bg.border_color: #x000000
+                                            draw_bg.border_radius: uniform(6.0)
+                                        }
+                                    }
+
+                                    // 标题行 + 副标题
+                                    View {
+                                        width: Fit
+                                        height: Fit
+                                        flow: Down
+                                        spacing: 2.
+
+                                        View {
+                                            width: Fit
+                                            height: Fit
+                                            flow: Right
+                                            spacing: 8.
+                                            align: Align{y: 0.5}
+
+                                            Label {
+                                                width: Fit
+                                                height: Fit
+                                                // Label 默认 padding = theme.mspace_1；顶栏文字要贴边，
+                                                // 否则两行文字会被撑高、把 40px 头像挤出 64px 的栏
+                                                padding: 0
+                                                text: "Decem"
+                                                draw_text +: {
+                                                    color: #xffffffff
+                                                    text_style: theme.font_bold{font_size: 18}
+                                                }
+                                            }
+
+                                            // Sparkles：Makepad 没有随包 SVG 图标集，
+                                            // 用 sparkles 字符代替（16px；该字形来自彩色 emoji 字体，
+                                            // 颜色固定为 emoji 自带的黄，`color` 只影响其轮廓）
+                                            Label {
+                                                width: Fit
+                                                height: Fit
+                                                padding: 0
+                                                text: "✨"
+                                                draw_text +: {
+                                                    color: #xFCE38A
+                                                    text_style: theme.font_regular{font_size: 16}
+                                                }
+                                            }
+                                        }
+
+                                        Label {
+                                            width: Fit
+                                            height: Fit
+                                            padding: 0
+                                            text: "在线 - 随时陪你聊天"
+                                            draw_text +: {
+                                                color: #xB3B3B3
+                                                text_style: theme.font_regular{font_size: 12}
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // 撑开，把右侧按钮推到最右
+                                View { width: Fill height: 1 }
+
+                                View {
+                                    width: Fit
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8.
+                                    align: Align{y: 0.5}
+
+                                    // 20px 图标位：无 SVG 图标集，用文字代替。
+                                    // 两个按钮目前只是占位，不接动作。
+                                    github_button := glass.Button {
+                                        text: "GH"
+                                        width: 40
+                                        height: 40
+                                        padding: 0
+                                        draw_text +: {
+                                            color: #xB3B3B3
+                                            color_hover: #xffffffff
+                                            text_style: theme.font_bold{font_size: 12}
+                                        }
+                                        draw_bg +: {
+                                            border_size: 0.0
+                                            border_radius: 16.0
+                                            color: #x00000000
+                                            color_hover: #x262626
+                                            color_down: #x333333
+                                            border_color: #x00000000
+                                            border_color_hover: #x00000000
+                                            border_color_down: #x00000000
+                                            top_glint: #x00000000
+                                            inner_shadow: #x00000000
+                                        }
+                                    }
+
+                                    settings_button := glass.Button {
+                                        // U+FE0E 请求文字样式，避免彩色 emoji 齿轮盖掉灰色
+                                        text: "⚙︎"
+                                        width: 40
+                                        height: 40
+                                        padding: 0
+                                        draw_text +: {
+                                            color: #xB3B3B3
+                                            color_hover: #xffffffff
+                                            text_style: theme.font_regular{font_size: 20}
+                                        }
+                                        draw_bg +: {
+                                            border_size: 0.0
+                                            border_radius: 16.0
+                                            color: #x00000000
+                                            color_hover: #x262626
+                                            color_down: #x333333
+                                            border_color: #x00000000
+                                            border_color_hover: #x00000000
+                                            border_color_down: #x00000000
+                                            top_glint: #x00000000
+                                            inner_shadow: #x00000000
+                                        }
+                                    }
+                                }
+                            }
+
+                            // 底部 1px 边框（整框描边会四边都画，所以单独一条）
+                            RectView {
+                                width: Fill
+                                height: 1
+                                show_bg: true
+                                draw_bg.color: #x333333
+                            }
+                        }
+
+                        // 消息列与输入区共用的内边距容器
+                        View {
+                            width: Fill
+                            height: Fill
+                            flow: Down
+                            spacing: 10.
+                            padding: Inset{left: 14 top: 10 right: 14 bottom: 12}
 
                         // 消息列：网页版是「内容列 768 居中，顶栏与输入区全宽」。
                         // 居中只能靠父层的 `align`（`Walk.align` 在布局里不生效，
@@ -1110,6 +1512,8 @@ script_mod! {
                                 draw_glass +: { tint: vec4(0.95, 0.51, 0.51, 0.34) }
                             }
                         }
+
+                        } // 内边距容器
 
                         // 「清空聊天记录」二次确认。Modal 是 overlay——
                         // on_after_apply 把向上报的 Walk 钉成 empty，
