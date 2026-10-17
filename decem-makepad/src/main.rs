@@ -24,7 +24,7 @@ use decem_core::{
 };
 use makepad_base64::{base64_encode, BASE64_STANDARD};
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, OnceLock, RwLock};
 use std::time::Duration;
 
@@ -114,24 +114,147 @@ fn push_message(text: String) {
     });
 }
 
-/// 头像图片只在第一次用到时读盘一次（两种角色各一份）。
+/// 头像图片只在第一次用到时读盘一次。
 /// 路径先试进程 cwd 下的 `public/images`，再试仓库根目录的 `../public/images`。
-fn read_avatar(name: &str) -> Option<Vec<u8>> {
+fn read_avatar(name: &str) -> Option<Arc<[u8]>> {
     ["public/images/", "../public/images/"]
         .iter()
         .find_map(|prefix| std::fs::read(format!("{prefix}{name}")).ok())
+        .map(Arc::from)
 }
 
-static CHAR_AVATAR: OnceLock<Option<Vec<u8>>> = OnceLock::new();
-static USER_AVATAR: OnceLock<Option<Vec<u8>>> = OnceLock::new();
+fn default_user_avatar() -> Option<Arc<[u8]>> {
+    read_avatar("user_01.jpg")
+}
 
-/// 读不到的返回 `None` —— 调用方只画头像环，不报错也不重试。
-fn avatar_bytes(role: Role) -> Option<&'static [u8]> {
-    let (slot, name) = match role {
-        Role::User => (&USER_AVATAR, "user_01.jpg"),
-        Role::Char => (&CHAR_AVATAR, "char_01.jpg"),
+static CHAR_AVATAR: OnceLock<Option<Arc<[u8]>>> = OnceLock::new();
+
+/// 用户头像。用户可以自己换，所以不能塞进 `OnceLock`：上传后要能整体替换。
+struct UserAvatar {
+    /// `None` 表示连默认图都没读到 —— 调用方只画头像环，不报错也不重试。
+    bytes: Option<Arc<[u8]>>,
+    /// 是否来自用户上传（持久化文件或本次会话选的）。顶栏据此决定画谁。
+    custom: bool,
+}
+
+/// 启动时由 `load_initial_user_avatar` 决定（持久化文件优先于仓库默认图），
+/// 上传时整体替换。预览、顶栏、后续消息行都从这里取。
+static USER_AVATAR: RwLock<Option<UserAvatar>> = RwLock::new(None);
+
+/// 读不到的返回 `None`。
+fn avatar_bytes(role: Role) -> Option<Arc<[u8]>> {
+    match role {
+        Role::User => {
+            let state = USER_AVATAR.read().unwrap();
+            match state.as_ref() {
+                Some(state) => state.bytes.clone(),
+                // 正常路径下 `after_new_from_script` 已经初始化；这里只是兜底
+                // （没有机会展示读盘警告了，但仍按默认图显示）
+                None => default_user_avatar(),
+            }
+        }
+        Role::Char => CHAR_AVATAR
+            .get_or_init(|| read_avatar("char_01.jpg"))
+            .clone(),
+    }
+}
+
+/// 顶栏头像：网页版顶栏画的是 Decem（char）；用户换过头像后跟随用户头像，
+/// 否则默认仍是 char_01（规格 §2）。
+fn header_avatar_bytes() -> Option<Arc<[u8]>> {
+    let custom = {
+        let state = USER_AVATAR.read().unwrap();
+        state
+            .as_ref()
+            .filter(|state| state.custom)
+            .and_then(|state| state.bytes.clone())
     };
-    slot.get_or_init(|| read_avatar(name)).as_deref()
+    custom.or_else(|| avatar_bytes(Role::Char))
+}
+
+// ---------------------------------------------------------------- 头像持久化
+
+/// 持久化头像支持的扩展名：写入时用原文件扩展名，启动时按这个顺序找。
+const AVATAR_EXTENSIONS: [&str; 6] = ["png", "jpg", "jpeg", "gif", "webp", "bmp"];
+
+/// `%APPDATA%\DecemChat`。读不到 `APPDATA` 时返回 `None`（保存会给出提示）。
+fn avatar_dir() -> Option<PathBuf> {
+    std::env::var_os("APPDATA").map(|base| Path::new(&base).join("DecemChat"))
+}
+
+/// 已保存的头像文件（`avatar.<ext>`）。按扩展名顺序取第一个存在的。
+fn stored_avatar_path() -> Option<PathBuf> {
+    let dir = avatar_dir()?;
+    AVATAR_EXTENSIONS
+        .iter()
+        .map(|extension| dir.join(format!("avatar.{extension}")))
+        .find(|path| path.is_file())
+}
+
+/// 把头像字节写成 `%APPDATA%\DecemChat\avatar.<ext>`，返回落盘路径。
+/// 换过格式时删掉旧的 `avatar.*`，否则启动时可能按扩展名顺序读回旧图。
+fn save_avatar(bytes: &[u8], source: &Path) -> Result<PathBuf, String> {
+    let dir = avatar_dir().ok_or_else(|| "读不到 APPDATA 环境变量，无法保存头像".to_owned())?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|err| format!("创建头像目录 {} 失败：{err}", dir.display()))?;
+
+    let extension = source
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .filter(|extension| AVATAR_EXTENSIONS.contains(&extension.as_str()))
+        .unwrap_or_else(|| "jpg".to_owned());
+    let target = dir.join(format!("avatar.{extension}"));
+
+    // 先写新的、再删旧的：写失败时旧头像还留着，不至于把用户已有头像弄丢
+    std::fs::write(&target, bytes)
+        .map_err(|err| format!("写入 {} 失败：{err}", target.display()))?;
+    for old_extension in AVATAR_EXTENSIONS {
+        let old = dir.join(format!("avatar.{old_extension}"));
+        if old != target && old.is_file() {
+            let _ = std::fs::remove_file(&old);
+        }
+    }
+    Ok(target)
+}
+
+/// 启动时决定用户头像：已保存的文件优先，否则退回 `public/images/user_01.jpg`。
+/// 读失败返回一句给用户看的原因（调用方追成一条 `⚠️` 消息），绝不静默吞掉。
+fn load_initial_user_avatar() -> (UserAvatar, Option<String>) {
+    let fallback = || UserAvatar {
+        bytes: default_user_avatar(),
+        custom: false,
+    };
+    let Some(path) = stored_avatar_path() else {
+        return (fallback(), None);
+    };
+    match std::fs::read(&path) {
+        Ok(bytes) if bytes.is_empty() => (
+            fallback(),
+            Some(format!("已保存的头像文件是空的：{}", path.display())),
+        ),
+        Ok(bytes) if bytes.len() > MAX_IMAGE_BYTES => (
+            fallback(),
+            Some(format!(
+                "已保存的头像太大（{:.1} MB），上限 {} MB：{}",
+                bytes.len() as f64 / 1_048_576.0,
+                MAX_IMAGE_BYTES / 1_048_576,
+                path.display()
+            )),
+        ),
+        // 字节留着给界面显示；解码失败由各个 Image 自己吞掉（只画环）
+        Ok(bytes) => (
+            UserAvatar {
+                bytes: Some(Arc::from(bytes)),
+                custom: true,
+            },
+            None,
+        ),
+        Err(err) => (
+            fallback(),
+            Some(format!("读不了保存的头像（{}）：{err}", path.display())),
+        ),
+    }
 }
 
 /// 把头像图贴进某一条消息的头像框。**只在部件新建时调**：
@@ -142,7 +265,7 @@ fn load_item_avatar(cx: &mut Cx, item: &WidgetRef, role: Role) {
         Some(bytes) => {
             photo.set_visible(cx, true);
             // 解码失败（文件损坏）就只剩环，不打断绘制
-            let _ = photo.load_image_from_data(cx, bytes);
+            let _ = photo.load_image_from_data(cx, &bytes);
         }
         None => photo.set_visible(cx, false),
     }
@@ -750,6 +873,9 @@ pub struct App {
     /// `DECEM_IMAGE` 启动钩子只查一次环境变量。
     #[rust]
     startup_image_checked: bool,
+    /// `DECEM_AVATAR` 启动钩子只查一次环境变量。
+    #[rust]
+    startup_avatar_checked: bool,
     /// 顶栏头像只贴一次图。
     #[rust]
     avatars_loaded: bool,
@@ -766,19 +892,34 @@ pub struct App {
 
 /// 文件对话框的 id，用来认出哪个对话框回了话。
 const PICK_IMAGE: LiveId = live_id!(pick_image);
+/// 头像上传用另一个 id：同一个 `FileDialogAction` 要区分「发消息的图」与「头像」。
+const PICK_AVATAR: LiveId = live_id!(pick_avatar);
+
+/// 图片对话框的扩展名过滤（图片消息与头像共用，保持一致）。
+fn image_extensions() -> Vec<String> {
+    ["png", "jpg", "jpeg", "gif", "webp", "bmp"]
+        .iter()
+        .map(|ext| (*ext).to_owned())
+        .collect()
+}
 
 impl App {
     /// 弹系统文件对话框挑一张图。结果走平台动作异步回来（见 `handle_file_dialog`）。
     /// `want_bytes(true)` 让平台在 worker 线程把字节读好，省得自己碰文件系统。
     fn pick_image(&mut self, cx: &mut Cx) {
-        let extensions: Vec<String> = ["png", "jpg", "jpeg", "gif", "webp", "bmp"]
-            .iter()
-            .map(|ext| (*ext).to_owned())
-            .collect();
         let dialog = FileDialog::new()
             .set_id(PICK_IMAGE)
             .set_title("选一张图".to_owned())
-            .add_filter("图片".to_owned(), extensions);
+            .add_filter("图片".to_owned(), image_extensions());
+        cx.open_select_file_dialog(dialog);
+    }
+
+    /// 弹系统文件对话框挑头像。过滤条件与图片消息完全一致。
+    fn pick_avatar(&mut self, cx: &mut Cx) {
+        let dialog = FileDialog::new()
+            .set_id(PICK_AVATAR)
+            .set_title("选一张头像".to_owned())
+            .add_filter("图片".to_owned(), image_extensions());
         cx.open_select_file_dialog(dialog);
     }
 
@@ -794,14 +935,60 @@ impl App {
             else {
                 continue;
             };
-            if *id != PICK_IMAGE {
-                continue;
-            }
-            if let Some(path) = paths.first() {
-                self.accept_image(cx, path);
+            let Some(path) = paths.first() else {
+                break;
+            };
+            match *id {
+                PICK_IMAGE => self.accept_image(cx, path),
+                PICK_AVATAR => self.accept_avatar(cx, path),
+                _ => continue,
             }
             break;
         }
+    }
+
+    /// 换头像：读字节 → 解码验证 → 落盘 → 更新全局头像（预览、顶栏、后续消息）。
+    /// 文件对话框与 `DECEM_AVATAR` 启动钩子都走这里。
+    fn accept_avatar(&mut self, cx: &mut Cx, path: &Path) {
+        let bytes: Arc<[u8]> = match std::fs::read(path) {
+            Ok(bytes) if bytes.is_empty() => {
+                push_message(format!("⚠️ 这张图是空文件：{}", path.display()));
+                return;
+            }
+            Ok(bytes) if bytes.len() > MAX_IMAGE_BYTES => {
+                push_message(format!(
+                    "⚠️ 头像图片太大（{:.1} MB），上限 {} MB",
+                    bytes.len() as f64 / 1_048_576.0,
+                    MAX_IMAGE_BYTES / 1_048_576
+                ));
+                return;
+            }
+            Ok(bytes) => Arc::from(bytes),
+            Err(err) => {
+                push_message(format!("⚠️ 读不了头像文件（{}）：{err}", path.display()));
+                return;
+            }
+        };
+
+        // 先解码验证：读不出来的文件不当成头像，也不落盘
+        let preview = self.ui.image(cx, ids!(avatar_preview_photo));
+        if let Err(err) = preview.load_image_from_data(cx, &bytes) {
+            push_message(format!("⚠️ 这张图读不出来：{err}"));
+            return;
+        }
+
+        *USER_AVATAR.write().unwrap() = Some(UserAvatar {
+            bytes: Some(bytes.clone()),
+            custom: true,
+        });
+        preview.set_visible(cx, true);
+        self.reload_header_avatar(cx);
+
+        // 落盘失败时头像在本次会话里仍然生效，但必须让用户知道重启后会丢
+        if let Err(reason) = save_avatar(&bytes, path) {
+            push_message(format!("⚠️ 头像已更新，但保存失败：{reason}"));
+        }
+        cx.redraw_all();
     }
 
     /// 把一张图读进来放进待发槽位（解码 + 算 data URL + 更新预览）。
@@ -851,14 +1038,33 @@ impl App {
             return;
         }
         self.avatars_loaded = true;
+        self.reload_header_avatar(cx);
+    }
+
+    /// 顶栏头像随时可以重贴（换头像后立即生效）。
+    fn reload_header_avatar(&self, cx: &mut Cx) {
         let photo = self.ui.image(cx, ids!(header_photo));
-        match avatar_bytes(Role::Char) {
+        match header_avatar_bytes() {
             Some(bytes) => {
                 photo.set_visible(cx, true);
-                let _ = photo.load_image_from_data(cx, bytes);
+                // 解码失败（文件损坏）就只剩环，不打断绘制
+                let _ = photo.load_image_from_data(cx, &bytes);
             }
             None => photo.set_visible(cx, false),
         }
+    }
+
+    /// 抽屉里的 64×64 头像预览 + 顶栏头像。首帧、打开抽屉、换头像时各同步一次。
+    fn sync_avatar_ui(&self, cx: &mut Cx) {
+        let photo = self.ui.image(cx, ids!(avatar_preview_photo));
+        match avatar_bytes(Role::User) {
+            Some(bytes) => {
+                let _ = photo.load_image_from_data(cx, &bytes);
+                photo.set_visible(cx, true);
+            }
+            None => photo.set_visible(cx, false),
+        }
+        self.reload_header_avatar(cx);
     }
 
     /// 一次性启动钩子：`DECEM_IMAGE=<路径>` 时把这张图直接放进待发槽位。
@@ -873,6 +1079,18 @@ impl App {
         self.startup_image_checked = true;
         if let Ok(path) = std::env::var("DECEM_IMAGE") {
             self.accept_image(cx, Path::new(&path));
+        }
+    }
+
+    /// 头像版的启动钩子：`DECEM_AVATAR=<路径>` 时走与文件对话框完全相同的
+    /// 「读入 → 解码 → 替换预览/顶栏 → 持久化」链路（系统对话框没法自动化驱动）。
+    fn load_startup_avatar(&mut self, cx: &mut Cx) {
+        if self.startup_avatar_checked {
+            return;
+        }
+        self.startup_avatar_checked = true;
+        if let Ok(path) = std::env::var("DECEM_AVATAR") {
+            self.accept_avatar(cx, Path::new(&path));
         }
     }
 
@@ -1150,7 +1368,17 @@ impl MatchEvent for App {
             self.models_open = false;
             self.set_models_open(cx, false);
             self.sync_model_ui(cx);
+            // 抽屉里的头像预览可能与最新状态不同步（换头像只改了全局状态）
+            self.sync_avatar_ui(cx);
             self.ui.modal(cx, ids!(settings_drawer)).open(cx);
+        }
+        // 「上传头像」：走与图片消息同一个系统文件对话框，id 不同。
+        if self
+            .ui
+            .button(cx, ids!(upload_avatar_button))
+            .clicked(actions)
+        {
+            self.pick_avatar(cx);
         }
         if self
             .ui
@@ -1232,6 +1460,11 @@ impl AppMain for App {
     }
 
     fn after_new_from_script(_vm: &mut ScriptVm, app: &mut Self) {
+        // 用户头像在部件树建立之前定下来：持久化文件优先于仓库默认图。
+        // 读失败要可见（这里是唯一能安全拿 CHAT 写锁的时机，push_message 会重入死锁）。
+        let (user_avatar, avatar_warning) = load_initial_user_avatar();
+        *USER_AVATAR.write().unwrap() = Some(user_avatar);
+
         let mut chat = CHAT.write().unwrap();
         chat.messages.push(Msg {
             role: Role::Char,
@@ -1239,6 +1472,14 @@ impl AppMain for App {
             image: None,
             time: now_hhmm(),
         });
+        if let Some(reason) = avatar_warning {
+            chat.messages.push(Msg {
+                role: Role::Char,
+                text: format!("⚠️ {reason}"),
+                image: None,
+                time: now_hhmm(),
+            });
+        }
         // 压测：DECEM_STRESS=1 时塞几百条，观察长列表滚动
         if std::env::var("DECEM_STRESS").is_ok() {
             for i in 0..300 {
@@ -1260,6 +1501,7 @@ impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.load_header_avatar(cx);
         self.load_startup_image(cx);
+        self.load_startup_avatar(cx);
         self.match_event(cx, event);
         if let Event::Actions(actions) = event {
             self.handle_file_dialog(cx, actions);
@@ -1281,6 +1523,8 @@ impl AppMain for App {
         if !self.drawer_synced && !self.ui.widget(cx, ids!(model_trigger_label)).is_empty() {
             self.drawer_synced = true;
             self.sync_model_ui(cx);
+            // 头像预览也在同一批部件里，建好就贴一次图
+            self.sync_avatar_ui(cx);
         }
         self.poll_worker(cx);
     }
@@ -2474,18 +2718,164 @@ script_mod! {
                                             draw_bg.color: #x333333
                                         }
 
-                                        // 后两段本轮只放标题占位（头像上传 / 深浅色模式下轮做）
-                                        Label {
+                                        // ── 第 2 段：更改头像（§5-2）
+                                        View {
                                             width: Fill
                                             height: Fit
-                                            padding: 0
-                                            text: "更改头像（下轮实现）"
-                                            draw_text +: {
-                                                color: #xB3B3B3
-                                                text_style: theme.font_regular{font_size: 14}
+                                            flow: Down
+                                            spacing: 8.
+
+                                            // 分区标题：16px 薄荷图标 + 14px 文字
+                                            View {
+                                                width: Fill
+                                                height: Fit
+                                                flow: Right
+                                                spacing: 8.
+                                                align: Align{y: 0.5}
+
+                                                Label {
+                                                    width: Fit
+                                                    height: Fit
+                                                    padding: 0
+                                                    text: "👤"
+                                                    draw_text +: {
+                                                        color: #x95E1D3
+                                                        text_style: theme.font_regular{font_size: 16}
+                                                    }
+                                                }
+
+                                                Label {
+                                                    width: Fit
+                                                    height: Fit
+                                                    padding: 0
+                                                    text: "更改头像"
+                                                    draw_text +: {
+                                                        color: #xffffffff
+                                                        text_style: theme.font_regular{font_size: 14}
+                                                    }
+                                                }
+                                            }
+
+                                            View {
+                                                width: Fill
+                                                height: Fit
+                                                flow: Right
+                                                spacing: 16.
+                                                align: Align{y: 0.5}
+
+                                                // 预览：64×64 圆形、2px 珊瑚边框。
+                                                // 环用 RoundedView 描边，图用 Image 自己的
+                                                // border_radius 裁圆（同消息头像）。
+                                                RoundedView {
+                                                    width: 64
+                                                    height: 64
+                                                    flow: Down
+                                                    align: Center
+                                                    padding: Inset{left: 2 top: 2 right: 2 bottom: 2}
+                                                    show_bg: true
+                                                    draw_bg.color: #x00000000
+                                                    draw_bg.border_size: 2.0
+                                                    draw_bg.border_color: #xF38181
+                                                    draw_bg.border_radius: uniform(32.0)
+
+                                                    // 没有图时由 Rust 侧隐藏，只剩环
+                                                    avatar_preview_photo := Image {
+                                                        width: Fill
+                                                        height: Fill
+                                                        fit: ImageFit.CropToFill
+                                                        draw_bg.border_radius: 30.0
+                                                    }
+                                                }
+
+                                                // 上传按钮：32 高、圆角 10、1px 边框、
+                                                // 16px 图标 + 8px 间距。文字与图标用 Label 拼，
+                                                // 透明 ButtonFlat 盖在上面只管命中（同模型触发器）。
+                                                RoundedView {
+                                                    width: Fill
+                                                    height: 32
+                                                    flow: Overlay
+                                                    show_bg: true
+                                                    draw_bg.color: #x00000000
+                                                    draw_bg.border_size: 1.0
+                                                    draw_bg.border_color: #xffffff1a
+                                                    draw_bg.border_radius: uniform(10.)
+
+                                                    View {
+                                                        width: Fill
+                                                        height: Fill
+                                                        flow: Right
+                                                        spacing: 8.
+                                                        align: Align{x: 0.5, y: 0.5}
+
+                                                        Label {
+                                                            width: Fit
+                                                            height: Fit
+                                                            padding: 0
+                                                            text: "↑"
+                                                            draw_text +: {
+                                                                color: #xffffffff
+                                                                text_style: theme.font_regular{font_size: 16}
+                                                            }
+                                                        }
+
+                                                        Label {
+                                                            width: Fit
+                                                            height: Fit
+                                                            padding: 0
+                                                            text: "上传头像"
+                                                            draw_text +: {
+                                                                color: #xffffffff
+                                                                text_style: theme.font_regular{font_size: 14}
+                                                            }
+                                                        }
+                                                    }
+
+                                                    upload_avatar_button := ButtonFlat {
+                                                        width: Fill
+                                                        height: Fill
+                                                        margin: 0
+                                                        padding: 0
+                                                        text: ""
+                                                        draw_text +: {
+                                                            color: #x00000000
+                                                            color_hover: #x00000000
+                                                            color_down: #x00000000
+                                                            color_focus: #x00000000
+                                                            color_disabled: #x00000000
+                                                        }
+                                                        draw_bg +: {
+                                                            border_size: 0.0
+                                                            border_radius: uniform(10.)
+                                                            color: #x00000000
+                                                            color_hover: #xffffff0d
+                                                            color_down: #xffffff1a
+                                                            color_focus: #x00000000
+                                                            color_disabled: #x00000000
+                                                            color_2: #x00000000
+                                                            color_2_hover: #x00000000
+                                                            color_2_down: #x00000000
+                                                            color_2_focus: #x00000000
+                                                            color_2_disabled: #x00000000
+                                                            border_color: #x00000000
+                                                            border_color_hover: #x00000000
+                                                            border_color_down: #x00000000
+                                                            border_color_focus: #x00000000
+                                                            border_color_disabled: #x00000000
+                                                        }
+                                                    }
+                                                }
                                             }
                                         }
 
+                                        // 段间分隔线（§5）
+                                        RectView {
+                                            width: Fill
+                                            height: 1
+                                            show_bg: true
+                                            draw_bg.color: #x333333
+                                        }
+
+                                        // 深浅色模式仍是占位（下轮做）
                                         Label {
                                             width: Fill
                                             height: Fit

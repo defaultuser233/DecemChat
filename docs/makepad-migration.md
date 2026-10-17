@@ -565,4 +565,35 @@ UI 不另存一份。选中态由 `static MODEL_ID: RwLock<&'static str>` 驱动
 6. 颜色仍是 RRGGBBAA：薄荷 20% 是 `#x95E1D333`，玻璃底是 `#x1a1a1acc`。
 
 与规格的差异：无滑出动画（静态贴右）、无 backdrop blur（Makepad 没有）、
-图标用文字字形（▼ / × / ⇄ / 👁）、头像与深浅色两段只有标题占位。
+图标用文字字形（▼ / × / ⇄ / 👁）、深浅色模式仍是标题占位（头像上传见 §17）。
+
+## 17. 更改头像与持久化（2026-10-17，已实装）
+
+抽屉 §5 的第 2 段「更改头像」：64×64 圆形预览（2px `#F38181` 环）+
+32px 高的「上传头像」按钮（圆角 10、1px 边框、16px 图标 + 8px 间距）。
+点按钮弹系统文件对话框（`PICK_AVATAR`，过滤条件与图片消息的 `PICK_IMAGE` 完全一致），
+选中后立刻换预览、顶栏头像，以及**后续**新建消息里的用户头像（已画出的旧消息不回溯）。
+
+持久化：`%APPDATA%\DecemChat\avatar.<ext>`（`std::env::var_os("APPDATA")`，
+目录不存在就 `create_dir_all`；扩展名跟随原文件，未知扩展名退回 `jpg`）。
+换格式会删掉旧的 `avatar.*`，否则启动时按扩展名顺序可能读回旧图。
+启动时优先读这个文件，覆盖 `public/images/user_01.jpg`；读失败会以 `⚠️` 消息提示，
+不会静默吞掉。`DECEM_AVATAR=<路径>` 启动钩子与文件对话框走同一条
+「读入 → 解码 → 替换 → 落盘」链路，用来绕过无法自动化的模态对话框。
+
+这次现踩的坑：
+
+1. **头像不能再用 `OnceLock`。** 上传后要能整体替换，改成
+   `RwLock<Option<UserAvatar>>`（`bytes` + `custom`）。`custom` 同时决定顶栏画谁：
+   网页版顶栏是 Decem（char）头像，这里保持默认 char、用户换过头像后才跟随用户头像。
+2. **不要在 `ChatList::draw_walk` 的路径上推消息。** 它持有 `CHAT` 读锁，
+   `push_message` 会再拿写锁——死锁。启动时的读盘错误只在
+   `after_new_from_script`（已持写锁，直接 push 到 `chat.messages`）里提示。
+3. **文件对话框要按 id 分流。** 两个对话框共用 `FileDialogAction`，
+   `handle_file_dialog` 必须按 `PICK_IMAGE` / `PICK_AVATAR` 分别调用
+   `accept_image` / `accept_avatar`，不能只认 id 之外就 `break`。
+4. **上传按钮用透明 `ButtonFlat` 盖在「图标 + 文字」行上**（同模型触发器），
+   这样 16px 图标与 8px 间距都能按像素摆；`ButtonFlat` 的 draw_bg 字段照
+   §15-1 的清单写，别混入 `top_glint` / `inner_shadow`。
+5. 预览图与顶栏图都是 `Image`：`fit: ImageFit.CropToFill`、`draw_bg.border_radius`
+   裁圆；没有图时 `set_visible(false)`，不要留空纹理占位。
