@@ -3,9 +3,11 @@ name = "decem-makepad"
 version = "0.1.0"
 edition = "2021"
 
-# 独立 crate + 自带 workspace：Makepad 那一大堆 vendored 依赖不会被并进主仓库的
-# cargo clippy --workspace（现有 CI 不受影响）
-[workspace]
+# 隔离靠根 Cargo.toml 的 `exclude = ["decem-makepad"]`（那条才是真正生效的）。
+# **不要在这里写 `[workspace]`**：`cargo makepad android` 会生成一个包装 crate
+# 并在它的 manifest 里追加 `[workspace]`，这里再写一份就会 `duplicate key`，
+# Android 打包直接失败（2026-10-17 踩过）。
+# 没有 `[workspace]` 也会自动拥有独立 Cargo.lock（包在根 workspace 之外时 cargo 的默认行为）。
 
 [dependencies]
 decem-core = { version = "0.1.0", path = "../crates/decem-core", default-features = false }

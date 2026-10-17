@@ -682,3 +682,42 @@ rgba(255,255,255,.8)`、char 气泡 `#1A1A1A → #FFFFFF`、输入区
 已知限制：浅色主题借用 Windows 的 token 表（字号/间距等非颜色令牌与深色
 略有差异）；没有 backdrop blur；代码块在浅色下仍是 tokyo-night 深色
 （与网页版一致）；`GlassButton` 的玻璃折射效果在浅色下偏白，但文字已保证可读。
+
+## 19. 应用图标与 Android 打包的一个坑（2026-10-17）
+
+### 图标
+
+`cargo_makepad` 自带图标支持，不需要 rc.exe / windres：
+
+| 平台 | 放哪 | 期望文件 |
+| --- | --- | --- |
+| Windows（exe 资源） | `<crate>/resources/` | **必需** `icon_32.png`、`icon_64.png`、`icon_128.png`、`icon.ico`；可选 `icon_256/512/1024.png`（`utils.rs:792-832`） |
+| macOS | 同上 | `icon.icns`，缺了就用 `icon_1024.png` 兜（`desktop.rs:165-173`） |
+| Android | `<crate>/resources/android/res/` | `mipmap-{mdpi,hdpi,xhdpi,xxhdpi,xxxhdpi}/ic_launcher.png`（48/72/96/144/192），整目录会被拷进 APK（`android/compile.rs:1062-1090`） |
+
+⚠️ **Windows 图标只在 `cargo makepad desktop build` 时链进 exe**。之后如果用普通
+`cargo build` 因为源码改动触发了重新链接，图标会丢——出正式包请统一走 `cargo makepad`。
+
+### 坑：`decem-makepad/Cargo.toml` 里不能写 `[workspace]`
+
+`cargo makepad android` 会生成一个包装 crate 并在它的 manifest 末尾追加 `[workspace]`；
+我们的 `Cargo.toml` 如果已经有一份，就变成 `duplicate key`，Android 打包直接失败：
+
+```
+error: duplicate key  --> Cargo.toml:26:2  | [workspace]
+```
+
+**隔离靠根 `Cargo.toml` 的 `exclude = ["decem-makepad"]`**（那条才是生效的）。
+删掉 crate 里的 `[workspace]` 后：桌面构建照常、`cargo metadata --no-deps` 里仍然
+不含 `decem-makepad`（未被并入主 workspace），`Cargo.lock` 依然独立。
+
+出包命令（`-p` 必填）：
+
+```bash
+cd decem-makepad
+cargo makepad android --abi=aarch64 --sdk-path='D:/Android/Sdk' \
+  --package-name=top.valedecem.decemchat --app-label='Decem Chat' \
+  build -p decem-makepad --release
+```
+
+产物：`target/android/makepad-android-apk/decem_makepad/apk/decemchat.apk`
