@@ -487,3 +487,42 @@ extern "system" {
 （`widgets/core/src/image.rs:289-296` 的 `border_radius` + `:207-224` 的像素路径），
 把它放在固定 40×40 的 `RoundedView`（2px 描边）里即可裁成圆；
 `Image` 仍要用 `width/height: Fill` 填满内框，**不要再写 `Fit`**（NaN 坑见 §12）。
+
+## 15. 输入区改版（2026-10-17，已实装）
+
+按 `docs/makepad-visual-spec.md` §4 重做输入区：外层全宽玻璃条 + 胶囊 + 珊瑚发送键 + 底部提示。
+下面四个坑都是这次现踩的，别再重犯。
+
+1. **`glass.Button` 不认 `color_disabled`。** `glass.Button` 是 `glass.CutButton`
+   （`widgets/families/extras/src/glass_panel.rs:821`），它把 `pixel` 换成了裁剪版，
+   只混合 `focus/hover/down`（`:861-878`），**没有 `disabled`**。所以
+   `set_disabled(cx, true)` 的字会变灰、底却仍是珊瑚。发送键要用核心的
+   `ButtonFlat`（完整着色器带 `disabled` 混合，`widgets/core/src/button.rs:1333-1346`
+   的 `set_disabled` 驱动 animator 的 `disabled` 轨道）。
+   ⚠️ 但 `ButtonFlat` 的 `draw_bg` **没有** `top_glint` / `inner_shadow`（那是 CutButton 的字段），
+   写进 `draw_bg +:` 会在运行期报 `[E]`——`cargo check` 看不见。
+
+2. **胶囊用 `Overlay`，发送键叠在 `TextInput` 上。** 胶囊高 56 = 40 内容 + 上下 8 内距；
+   `TextInput` 用 `Fill/Fill` 铺满胶囊，发送键是 `Overlay` 的第二个子节点（40×40、右中）。
+   View 默认 `event_order: Up`（`widgets/core/src/view.rs:41-47`），最后画的按钮先收事件，
+   命中按下后 `t.handled` 会把事件占住，**输入框不会抢走发送键的点击**；
+   文字区也不会被盖住，因为 `TextInput` 的右内距留了 8 + 40 + 8。
+   `Image` 仍然不能进 `flow: Right`（§12 的 NaN），「🖼」按钮继续放在胶囊外。
+
+3. **空 `Image` 的预览位会把输入区撑高一大截。** 旧布局里 `pending_photo` 是
+   `width: Fit / height: Fit / max_height: 120`，空纹理时高度落回 120（§12），
+   输入条被顶成 350px。修法有两条：`set_visible(false)`，
+   以及**不要用 `Fit` 宽度**——改成固定 `width: 120 height: 80`
+   （Image 在 Fit 宽度下占位不画纹理，同 §12 第二条）。显隐在
+   `App::handle_event` 首帧 / `accept_image` / `send` 三处同步。
+
+4. **聚焦外描边只能近似。** Makepad 没有 `box-shadow`，也画不出矩形外的描边。
+   这里在胶囊的 `Overlay` 里放一圈 `visible: false` 的 `RoundedView`
+   （`border_size: 2.0`、珊瑚 30%），靠 `TextInputAction::KeyFocus` /
+   `KeyFocusLost`（`widgets/core/src/text_input.rs:3063` / `:2237`）切显隐，
+   用 `actions.filter_widget_actions_cast::<TextInputAction>(uid)`
+   （`widgets/core/src/widget.rs:1848`）过滤。实测聚焦时描边像素为
+   `(92,58,58)`，正是 30% 珊瑚压在 `(27,27,27)` 的胶囊底上。
+
+另外：Makepad 的十六进制颜色是 **RRGGBBAA**（不是 AARRGGBB）。写成
+`#x4DF38181` 会得到一条绿描边，30% 珊瑚要写 `#xF381814D`。

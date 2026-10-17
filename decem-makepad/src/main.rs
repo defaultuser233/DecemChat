@@ -608,6 +608,9 @@ pub struct App {
     /// 顶栏头像只贴一次图。
     #[rust]
     avatars_loaded: bool,
+    /// 发送键的禁用态只在首帧同步一次（之后跟着动作批同步）。
+    #[rust]
+    send_state_synced: bool,
 }
 
 /// 文件对话框的 id，用来认出哪个对话框回了话。
@@ -666,7 +669,10 @@ impl App {
             push_message(format!("⚠️ 这张图读不出来：{err}"));
             return;
         }
+        photo.set_visible(cx, true);
         self.pending_image = Some(attachment);
+        // 只有图片、没有文字也能发：待发图一进来就要点亮发送键。
+        self.sync_send_enabled(cx);
         cx.redraw_all();
     }
 
@@ -719,6 +725,35 @@ impl App {
         }
     }
 
+    /// 胶囊的聚焦描边：Makepad 没有 box-shadow，改用 `focus_ring` 那圈 2px 内描边。
+    /// TextInput 在拿到/失去键盘焦点时会发 `KeyFocus` / `KeyFocusLost` 动作
+    /// （widgets/core/src/text_input.rs:3063、2237），这里照着切显隐。
+    fn sync_input_focus(&self, cx: &mut Cx, actions: &Actions) {
+        let uid = self.ui.text_input(cx, ids!(input)).widget_uid();
+        let mut focused = None;
+        for action in actions.filter_widget_actions_cast::<TextInputAction>(uid) {
+            match action {
+                TextInputAction::KeyFocus => focused = Some(true),
+                TextInputAction::KeyFocusLost => focused = Some(false),
+                _ => {}
+            }
+        }
+        if let Some(focused) = focused {
+            self.ui
+                .widget(cx, ids!(focus_ring))
+                .set_visible(cx, focused);
+        }
+    }
+
+    /// 发送键禁用态：没有文字也没有待发图片时置灰（规格 §4）。
+    fn sync_send_enabled(&self, cx: &mut Cx) {
+        let has_text = !self.ui.text_input(cx, ids!(input)).text().trim().is_empty();
+        let enabled = has_text || self.pending_image.is_some();
+        self.ui
+            .widget(cx, ids!(send_button))
+            .set_disabled(cx, !enabled);
+    }
+
     fn send(&mut self, cx: &mut Cx) {
         let input = self.ui.text_input(cx, ids!(input));
         let text = input.text().trim().to_owned();
@@ -745,8 +780,10 @@ impl App {
             (payload, chat.messages.len() + 1)
         };
 
-        // 预览图跟着清掉
-        self.ui.image(cx, ids!(pending_photo)).set_texture(cx, None);
+        // 预览图跟着清掉（空图要一起隐藏，否则会白占一块高度）
+        let pending_photo = self.ui.image(cx, ids!(pending_photo));
+        pending_photo.set_texture(cx, None);
+        pending_photo.set_visible(cx, false);
 
         match payload {
             Ok(body) => self.worker = Some(Worker::spawn_chat(body)),
@@ -886,23 +923,15 @@ impl App {
 
 impl MatchEvent for App {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        if self
-            .ui
-            .glass_button(cx, ids!(attach_button))
-            .clicked(actions)
-        {
+        if self.ui.button(cx, ids!(attach_button)).clicked(actions) {
             self.pick_image(cx);
         }
-        if self.ui.glass_button(cx, ids!(send_button)).clicked(actions) {
+        if self.ui.button(cx, ids!(send_button)).clicked(actions) {
             self.send(cx);
         }
         // 清空聊天记录：先弹二次确认。Modal 的 can_dismiss 默认 true，
         // 点遮罩或 Esc 即取消，Modal 自己关，不用接 dismissed。
-        if self
-            .ui
-            .glass_button(cx, ids!(clear_button))
-            .clicked(actions)
-        {
+        if self.ui.button(cx, ids!(clear_button)).clicked(actions) {
             self.ui.modal(cx, ids!(clear_confirm)).open(cx);
         }
         if self
@@ -944,6 +973,11 @@ impl MatchEvent for App {
         if self.ui.text_input(cx, ids!(input)).escaped(actions) {
             self.cancel(cx);
         }
+
+        // 输入区的两处状态：聚焦描边（TextInput 的 KeyFocus/KeyFocusLost 动作）
+        // 与发送键禁用态（空输入且没有待发图时置灰）。
+        self.sync_input_focus(cx, actions);
+        self.sync_send_enabled(cx);
     }
 }
 
@@ -997,6 +1031,18 @@ impl AppMain for App {
             self.handle_file_dialog(cx, actions);
         }
         self.ui.handle_event(cx, event, &mut Scope::empty());
+        // 首帧的发送键状态：部件树真正建立之前拿不到按钮，所以一直试到建好为止。
+        if !self.send_state_synced && !self.ui.widget(cx, ids!(send_button)).is_empty() {
+            self.send_state_synced = true;
+            // 空 Image 会占住 max_height，必须显式隐藏（迁移文档 §6 的坑）。
+            // 但 DECEM_IMAGE 可能已经先一步把图放好了，别把它盖掉。
+            if self.pending_image.is_none() {
+                self.ui
+                    .image(cx, ids!(pending_photo))
+                    .set_visible(cx, false);
+            }
+            self.sync_send_enabled(cx);
+        }
         self.poll_worker(cx);
     }
 }
@@ -1444,13 +1490,21 @@ script_mod! {
                             }
                         }
 
-                        // 消息列与输入区共用的内边距容器
+                        // 消息列与输入区的外层。输入区要全宽（规格 §1），
+                        // 所以内边距只给消息列，输入区自己带 12 的内距。
                         View {
                             width: Fill
                             height: Fill
                             flow: Down
-                            spacing: 10.
-                            padding: Inset{left: 14 top: 10 right: 14 bottom: 12}
+                            spacing: 0
+                            padding: 0
+
+                        // 消息列容器
+                        View {
+                            width: Fill
+                            height: Fill
+                            flow: Down
+                            padding: Inset{left: 14 top: 10 right: 14 bottom: 10}
 
                         // 消息列：网页版是「内容列 768 居中，顶栏与输入区全宽」。
                         // 居中只能靠父层的 `align`（`Walk.align` 在布局里不生效，
@@ -1468,52 +1522,222 @@ script_mod! {
                             }
                         }
 
-                        // 待发图片的预览。没有图片时没有纹理，高度收成 0、不占位
-                        pending_photo := Image {
-                            width: Fit
-                            height: Fit
-                            max_height: FitBound.Abs(120)
-                            fit: ImageFit.Smallest
-                        }
+                        } // 消息列容器
 
-                        View{
+                        // ── 输入区（规格 §4）：全宽、顶部 1px 边框、玻璃底、内距 12
+                        View {
                             width: Fill
                             height: Fit
-                            flow: Right
-                            spacing: 8.
-                            align: Align{y: 1.0}
+                            flow: Down
 
-                            // 清空放在最左：离「发送」最远，降低误触概率。
-                            // 二次确认弹层见下面 body 末尾的 clear_confirm。
-                            clear_button := glass.GlassButton {
-                                text: "清空"
-                                width: 64
-                                height: 44
-                            }
-
-                            attach_button := glass.GlassButtonProminent {
-                                text: "＋图"
-                                width: 72
-                                height: 44
-                                // 强调色统一到用户气泡的珊瑚色（prominent 的默认 tint 是蓝 0.16,0.46,0.92）
-                                draw_glass +: { tint: vec4(0.95, 0.51, 0.51, 0.34) }
-                            }
-
-                            input := glass.TextInput {
+                            // 顶部 1px 边框（整框描边会四边都画，所以单独一条）
+                            RectView {
                                 width: Fill
-                                height: 44
-                                empty_text: "发个消息聊聊呗～（Enter 发送，Esc 中断）"
+                                height: 1
+                                show_bg: true
+                                draw_bg.color: #x333333
                             }
 
-                            send_button := glass.GlassButtonProminent {
-                                text: "发送"
-                                width: 84
-                                height: 44
-                                draw_glass +: { tint: vec4(0.95, 0.51, 0.51, 0.34) }
+                            RoundedView {
+                                width: Fill
+                                height: Fit
+                                flow: Down
+                                padding: Inset{left: 12 top: 12 right: 12 bottom: 12}
+                                show_bg: true
+                                // rgba(20,20,20,0.8)
+                                draw_bg.color: #x141414cc
+                                draw_bg.border_radius: uniform(0.)
+
+                                // 待发图片的预览（规格 §4：80 高、圆角 12）。
+                                // **宽度不能是 Fit**：Fit 宽度下 Image 会占住位置却不画纹理
+                                // （用户气泡里的图也踩过，见 §12）。没有图片时显隐由 Rust 侧管。
+                                pending_photo := Image {
+                                    width: 120
+                                    height: 80
+                                    fit: ImageFit.Smallest
+                                    draw_bg.border_radius: 12.0
+                                }
+
+                                View{
+                                    width: Fill
+                                    height: Fit
+                                    flow: Right
+                                    spacing: 8.
+                                    align: Align{y: 0.5}
+
+                                    // 清空放在最左：离「发送」最远，降低误触概率。
+                                    // 二次确认弹层见下面 body 末尾的 clear_confirm。
+                                    clear_button := glass.Button {
+                                        text: "清空"
+                                        width: 56
+                                        height: 40
+                                        padding: 0
+                                        draw_text +: {
+                                            color: #xB3B3B3
+                                            color_hover: #xEF4444
+                                            color_down: #xEF4444
+                                            text_style: theme.font_regular{font_size: 12}
+                                        }
+                                        draw_bg +: {
+                                            border_size: 0.0
+                                            border_radius: uniform(16.0)
+                                            color: #x00000000
+                                            color_hover: #xEF44441A
+                                            color_down: #xEF44442E
+                                            border_color: #x00000000
+                                            border_color_hover: #x00000000
+                                            border_color_down: #x00000000
+                                            top_glint: #x00000000
+                                            inner_shadow: #x00000000
+                                        }
+                                    }
+
+                                    // 图片按钮：规格里它在胶囊内，但非输入部件进入输入行
+                                    // 会经 NaN 弄坏 TextInput 的命中区（见迁移文档 §12），
+                                    // 所以放在胶囊外、紧挨着胶囊左缘。
+                                    attach_button := glass.Button {
+                                        text: "🖼"
+                                        width: 40
+                                        height: 40
+                                        padding: 0
+                                        draw_text +: {
+                                            color: #xB3B3B3
+                                            color_hover: #xF38181
+                                            color_down: #xF38181
+                                            text_style: theme.font_regular{font_size: 18}
+                                        }
+                                        draw_bg +: {
+                                            border_size: 0.0
+                                            border_radius: uniform(16.0)
+                                            color: #x00000000
+                                            color_hover: #xF381811A
+                                            color_down: #xF381812E
+                                            border_color: #x00000000
+                                            border_color_hover: #x00000000
+                                            border_color_down: #x00000000
+                                            top_glint: #x00000000
+                                            inner_shadow: #x00000000
+                                        }
+                                    }
+
+                                    // 胶囊：56 高 = 40 内容 + 上下各 8 内距。
+                                    // 用 Overlay 而不是把发送按钮塞进 Right 行：
+                                    // 按钮要叠在输入框右端，同时不参与输入行的宽度计算。
+                                    pill := View {
+                                        width: Fill
+                                        height: 56
+                                        flow: Overlay
+                                        align: Align{x: 0.0, y: 0.0}
+
+                                        RoundedView {
+                                            width: Fill
+                                            height: Fill
+                                            flow: Right
+                                            spacing: 8.
+                                            align: Align{y: 0.5}
+                                            padding: Inset{left: 8 top: 8 right: 8 bottom: 8}
+                                            show_bg: true
+                                            // rgba(38,38,38,0.5)
+                                            draw_bg.color: #x26262680
+                                            draw_bg.border_radius: uniform(16.)
+
+                                            // 14px、透明底、无边框；单行输入由 TextInput
+                                            // 自己把字形垂直居中（text_input.rs:1717-1740）
+                                            input := glass.TextInput {
+                                                width: Fill
+                                                height: Fill
+                                                padding: Inset{left: 8 right: 8 top: 10 bottom: 10}
+                                                empty_text: "发个消息聊聊呗～（Enter 发送，Esc 中断）"
+                                                draw_bg +: {
+                                                    border_size: 0.0
+                                                    border_radius: uniform(8.)
+                                                    color: #x00000000
+                                                    color_hover: #x00000000
+                                                    color_focus: #x00000000
+                                                    color_down: #x00000000
+                                                    color_empty: #x00000000
+                                                    border_color: #x00000000
+                                                    border_color_hover: #x00000000
+                                                    border_color_focus: #x00000000
+                                                    border_color_down: #x00000000
+                                                    border_color_empty: #x00000000
+                                                }
+                                                draw_text +: {
+                                                    color: #xffffffff
+                                                    color_hover: #xffffffff
+                                                    color_focus: #xffffffff
+                                                    color_empty: #xB3B3B3
+                                                    color_empty_hover: #xB3B3B3
+                                                    color_empty_focus: #xB3B3B3
+                                                    text_style: theme.font_regular{font_size: 14}
+                                                }
+                                            }
+
+                                            // 40×40、圆角 16 的珊瑚发送键。
+                                            // Makepad 没有图标集，箭头用文字（规格允许）。
+                                            // 必须是 ButtonFlat 而不是 glass.Button：后者的
+                                            // 裁剪版 draw_bg（glass_panel.rs:841-878）不混合
+                                            // color_disabled，禁用态只有文字会变灰。
+                                            send_button := ButtonFlat {
+                                                text: "↑"
+                                                width: 40
+                                                height: 40
+                                                padding: 0
+                                                draw_text +: {
+                                                    color: #xffffffff
+                                                    color_hover: #xffffffff
+                                                    color_down: #xffffffff
+                                                    color_disabled: #xB3B3B380
+                                                    text_style: theme.font_bold{font_size: 18}
+                                                }
+                                                draw_bg +: {
+                                                    border_size: 0.0
+                                                    border_radius: uniform(16.0)
+                                                    color: #xF38181
+                                                    color_hover: #xe86a6a
+                                                    color_down: #xe86a6a
+                                                    color_focus: #xF38181
+                                                    // 禁用：深灰底 + 半透明，近似网页版的 opacity .5
+                                                    color_disabled: #x26262680
+                                                    border_color: #x00000000
+                                                    border_color_hover: #x00000000
+                                                    border_color_down: #x00000000
+                                                    border_color_disabled: #x00000000
+                                                }
+                                            }
+                                        }
+
+                                        // 聚焦外描边的近似：Makepad 没有 box-shadow，
+                                        // 用一圈 2px 内描边代替（不占布局）。
+                                        // 显隐由 Rust 侧的 TextInputAction::KeyFocus /
+                                        // KeyFocusLost 驱动（main.rs::sync_input_focus）。
+                                        focus_ring := RoundedView {
+                                            width: Fill
+                                            height: Fill
+                                            visible: false
+                                            draw_bg.color: #x00000000
+                                            draw_bg.border_size: 2.0
+                                            draw_bg.border_color: #xF381814D
+                                            draw_bg.border_radius: uniform(16.)
+                                        }
+                                    }
+                                }
+
+                                // 底部提示（规格 §4）
+                                Label {
+                                    width: Fill
+                                    height: Fit
+                                    padding: Inset{top: 8}
+                                    align: Align{x: 0.5}
+                                    text: "按 Enter 发送，Shift + Enter 换行"
+                                    draw_text +: {
+                                        color: #xB3B3B3
+                                        text_style: theme.font_regular{font_size: 12}
+                                    }
+                                }
                             }
                         }
-
-                        } // 内边距容器
+                        } // 消息列 + 输入区的外层
 
                         // 「清空聊天记录」二次确认。Modal 是 overlay——
                         // on_after_apply 把向上报的 Walk 钉成 empty，
