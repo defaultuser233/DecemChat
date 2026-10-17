@@ -931,7 +931,7 @@ script_mod! {
                         width: Fill
                         height: Fit
                         show_bg: true
-                        draw_bg.color: #x24242c
+                        draw_bg.color: #x1a1a1a
                         draw_bg.border_radius: uniform(16.)
                         padding: Inset{left: 14 top: 10 right: 14 bottom: 10}
 
@@ -957,7 +957,7 @@ script_mod! {
                                         read_only: true
                                         show_gutter: false
                                         // 底色与网页版 pre 一致：rgba(0,0,0,0.3)（MessageBubble.tsx 的 bg-black/30），
-                                        // 铺在气泡底色 #x24242c 上约等于深蓝黑
+                                        // 铺在气泡底色 #x1a1a1a 上约等于近黑
                                         draw_bg +: { color: #x0000004D }
                                     }
                                 }
@@ -974,12 +974,15 @@ script_mod! {
                     width: Fit
                     height: 30
                     padding: Inset{left: 12 right: 12 top: 0 bottom: 0}
-                    // 淡橙：与用户气泡的橙（#E95620）同族，提示这是对最后一段问答的操作
-                    draw_glass +: { tint: vec4(0.91, 0.34, 0.13, 0.18) }
+                    // 淡珊瑚：与用户气泡的珊瑚（#F38181）同族，提示这是对最后一段问答的操作
+                    draw_glass +: { tint: vec4(0.95, 0.51, 0.51, 0.18) }
                 }
             }
 
-            // 用户一侧：右对齐、橙色气泡（与网页版同一个橙 #E95620）
+            // 用户一侧：右对齐、珊瑚气泡。网页版是 135° 渐变 #F38181 → #e86a6a，
+            // 而 Makepad 的 RoundedView 只有轴对齐双色渐变（`color_2` +
+            // `gradient_fill_horizontal`，widgets/core/src/view_ui.rs:351-372）：
+            // 默认按 pos.y 竖直铺，取它作 135° 的近似，方向仍是左上 → 右下。
             User := View {
                 width: Fill
                 height: Fit
@@ -992,7 +995,8 @@ script_mod! {
                         height: Fit
                         flow: Down
                         show_bg: true
-                        draw_bg.color: #xE95620
+                        draw_bg.color: #xF38181
+                        draw_bg.color_2: #xe86a6a
                         draw_bg.border_radius: uniform(16.)
                         padding: Inset{left: 14 top: 10 right: 14 bottom: 10}
 
@@ -1031,9 +1035,23 @@ script_mod! {
                         spacing: 10.
                         padding: Inset{left: 14 top: 10 right: 14 bottom: 12}
                         show_bg: true
-                        draw_bg.color: theme.color_bg_app
+                        draw_bg.color: #x000000
 
-                        chat_list := ChatList {}
+                        // 消息列：网页版是「内容列 768 居中，顶栏与输入区全宽」。
+                        // 居中只能靠父层的 `align`（`Walk.align` 在布局里不生效，
+                        // 起作用的是 turtle 的 `Layout.align`，见 draw/src/turtle.rs:3097），
+                        // 所以在中间套一层全宽容器。ChatList 仍是 Fill——窄窗口不溢出，
+                        // 只是用 `max_width` 把宽窗口下的消息列收到 768（与 `Image` 的
+                        // `max_height: FitBound.Abs(…)` 同一个写法）。
+                        View {
+                            width: Fill
+                            height: Fill
+                            align: Align{x: 0.5}
+
+                            chat_list := ChatList {
+                                max_width: FitBound.Abs(768)
+                            }
+                        }
 
                         // 待发图片的预览。没有图片时没有纹理，高度收成 0、不占位
                         pending_photo := Image {
@@ -1062,6 +1080,8 @@ script_mod! {
                                 text: "＋图"
                                 width: 72
                                 height: 44
+                                // 强调色统一到用户气泡的珊瑚色（prominent 的默认 tint 是蓝 0.16,0.46,0.92）
+                                draw_glass +: { tint: vec4(0.95, 0.51, 0.51, 0.34) }
                             }
 
                             input := glass.TextInput {
@@ -1074,6 +1094,7 @@ script_mod! {
                                 text: "发送"
                                 width: 84
                                 height: 44
+                                draw_glass +: { tint: vec4(0.95, 0.51, 0.51, 0.34) }
                             }
                         }
 
