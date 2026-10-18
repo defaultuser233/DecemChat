@@ -2,6 +2,11 @@ import { useState, useRef, useCallback } from 'react';
 import { Send, Image, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { extractGifGrid } from '@/services/gifFrames';
+import { compressImage } from '@/lib/images';
+import { useToast } from '@/hooks/use-toast';
+
+/** 上传大小上限：压缩前先挡掉极端文件，避免解码超大图卡住 WebView。 */
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 
 interface ChatInputProps {
   onSendMessage: (content: string, imageUrl?: string, hint?: string) => void;
@@ -14,10 +19,15 @@ export function ChatInput({ onSendMessage, isLoading }: ChatInputProps) {
   const [imageToSend, setImageToSend] = useState<string | null>(null);
   const [isGif, setIsGif] = useState(false);
   const [isExtracting, setIsExtracting] = useState(false);
+  const [isCompressing, setIsCompressing] = useState(false);
   const [gifFrameCount, setGifFrameCount] = useState<number | null>(null);
   const [isFocused, setIsFocused] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
+  // 连续选择图片时，只接受最后一次选择的结果
+  const selectionTokenRef = useRef(0);
+  const { toast } = useToast();
+  const isProcessingImage = isExtracting || isCompressing;
 
   // Auto-resize textarea
   const adjustTextareaHeight = useCallback(() => {
@@ -34,7 +44,7 @@ export function ChatInput({ onSendMessage, isLoading }: ChatInputProps) {
   };
 
   const handleSend = useCallback(() => {
-    if ((!input.trim() && !imagePreview) || isLoading || isExtracting) return;
+    if ((!input.trim() && !imagePreview) || isLoading || isProcessingImage) return;
 
     const sendImage = imageToSend || imagePreview || undefined;
     const hint =
@@ -49,13 +59,23 @@ export function ChatInput({ onSendMessage, isLoading }: ChatInputProps) {
     setIsGif(false);
     setGifFrameCount(null);
     setIsExtracting(false);
+    setIsCompressing(false);
+    selectionTokenRef.current += 1;
 
     // Reset textarea height and keep cursor focus
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
       textareaRef.current.focus();
     }
-  }, [input, imagePreview, imageToSend, gifFrameCount, isLoading, isExtracting, onSendMessage]);
+  }, [
+    input,
+    imagePreview,
+    imageToSend,
+    gifFrameCount,
+    isLoading,
+    isProcessingImage,
+    onSendMessage,
+  ]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -64,54 +84,94 @@ export function ChatInput({ onSendMessage, isLoading }: ChatInputProps) {
     }
   };
 
-  const handleImageSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  const handleImageSelect = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      // 清空 value，保证下次能重复选择同一个文件
+      e.target.value = '';
+      if (!file) return;
 
-    // Check file size (max 5MB)
-    if (file.size > 5 * 1024 * 1024) {
-      alert('图片大小不能超过5MB');
-      return;
-    }
-
-    const isGifFile = file.type === 'image/gif';
-    setIsGif(isGifFile);
-    setGifFrameCount(null);
-    setImageToSend(null);
-    setIsExtracting(isGifFile);
-
-    const reader = new FileReader();
-    reader.onloadend = async () => {
-      const dataUrl = reader.result as string;
-
-      if (!isGifFile) {
-        setImagePreview(dataUrl);
-        setImageToSend(dataUrl);
+      if (file.size > MAX_IMAGE_BYTES) {
+        toast({
+          title: '图片过大',
+          description: '图片大小不能超过5MB',
+          variant: 'destructive',
+        });
         return;
       }
 
-      // GIF：抽帧期间先显示原图，完成后替换为拼接网格图
-      setImagePreview(dataUrl);
-      const result = await extractGifGrid(file);
-      if (result) {
-        setImagePreview(result.dataUrl);
-        setImageToSend(result.dataUrl);
-        setGifFrameCount(result.frameCount);
-      } else {
-        // 抽帧失败则回退为原图（模型只会看到首帧）
-        setImageToSend(dataUrl);
+      const token = selectionTokenRef.current + 1;
+      selectionTokenRef.current = token;
+      const isGifFile = file.type === 'image/gif' || /\.gif$/i.test(file.name);
+
+      setIsGif(isGifFile);
+      setGifFrameCount(null);
+      setImagePreview(null);
+      setImageToSend(null);
+      setIsExtracting(isGifFile);
+      setIsCompressing(false);
+
+      if (isGifFile) {
+        // GIF 必须原样保留（重编码会丢帧），compressImage 对 GIF 直接返回原图
+        // 抽帧期间先显示原图，完成后替换为拼接网格图
+        try {
+          const original = await compressImage(file);
+          if (selectionTokenRef.current !== token) return;
+          setImagePreview(original.dataUrl);
+
+          const result = await extractGifGrid(file);
+          if (selectionTokenRef.current !== token) return;
+          if (result) {
+            setImagePreview(result.dataUrl);
+            setImageToSend(result.dataUrl);
+            setGifFrameCount(result.frameCount);
+          } else {
+            // 抽帧失败则回退为原图（模型只会看到首帧）
+            setImageToSend(original.dataUrl);
+          }
+        } catch (error) {
+          if (selectionTokenRef.current !== token) return;
+          console.error('GIF 处理失败:', error);
+          toast({
+            title: '图片处理失败',
+            description: '请换一张图片再试试',
+            variant: 'destructive',
+          });
+        } finally {
+          if (selectionTokenRef.current === token) setIsExtracting(false);
+        }
+        return;
       }
-      setIsExtracting(false);
-    };
-    reader.readAsDataURL(file);
-  }, []);
+
+      setIsCompressing(true);
+      try {
+        const { dataUrl } = await compressImage(file);
+        if (selectionTokenRef.current !== token) return;
+        setImagePreview(dataUrl);
+        setImageToSend(dataUrl);
+      } catch (error) {
+        if (selectionTokenRef.current !== token) return;
+        console.error('图片压缩失败:', error);
+        toast({
+          title: '图片处理失败',
+          description: '请换一张图片再试试',
+          variant: 'destructive',
+        });
+      } finally {
+        if (selectionTokenRef.current === token) setIsCompressing(false);
+      }
+    },
+    [toast]
+  );
 
   const clearImage = useCallback(() => {
+    selectionTokenRef.current += 1;
     setImagePreview(null);
     setImageToSend(null);
     setIsGif(false);
     setGifFrameCount(null);
     setIsExtracting(false);
+    setIsCompressing(false);
     if (imageInputRef.current) {
       imageInputRef.current.value = '';
     }
@@ -145,6 +205,12 @@ export function ChatInput({ onSendMessage, isLoading }: ChatInputProps) {
             </p>
           )}
         </div>
+      )}
+
+      {isCompressing && (
+        <p className="mb-2 text-xs text-muted-foreground animate-slide-up">
+          正在压缩图片…
+        </p>
       )}
 
       {/* Input Area */}
@@ -187,7 +253,7 @@ export function ChatInput({ onSendMessage, isLoading }: ChatInputProps) {
         {/* Send Button */}
         <Button
           onClick={handleSend}
-          disabled={(!input.trim() && !imagePreview) || isLoading || isExtracting}
+          disabled={(!input.trim() && !imagePreview) || isLoading || isProcessingImage}
           size="icon"
           className={`flex-shrink-0 w-10 h-10 rounded-xl transition-all duration-300 ${
             (input.trim() || imagePreview) && !isLoading

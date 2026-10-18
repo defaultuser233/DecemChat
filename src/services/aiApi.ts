@@ -1,5 +1,6 @@
 import type { Message } from '@/types';
 import { AVAILABLE_MODELS } from '@/types';
+import { fitRequestBudget, REQUEST_BUDGET_BYTES } from '@/lib/images';
 import { SYSTEM_PROMPT } from './SYSTEM_PROMPT';
 
 // 调用 Netlify Edge Function 代理接口
@@ -29,9 +30,23 @@ function supportsTemperature(model: string): boolean {
   return modelInfo?.supportsTemperature ?? true;
 }
 
+interface FormattedContentPart {
+  type: 'text' | 'image_url';
+  text?: string;
+  image_url?: { url: string };
+}
+
+interface FormattedMessage {
+  role: Message['role'] | 'system';
+  content: string | FormattedContentPart[];
+}
+
 // Format messages for API
-function formatMessages(messages: Message[], model: string): any[] {
-  const formattedMessages: any[] = [
+function formatMessages(
+  messages: Message[],
+  model: string
+): FormattedMessage[] {
+  const formattedMessages: FormattedMessage[] = [
     {
       role: 'system',
       content: SYSTEM_PROMPT
@@ -167,6 +182,23 @@ export async function sendMessageStream(
       body.temperature = 0.8;
     }
 
+    // 超过预算时从最旧的图片开始降级成 [图片]，避免后端 32MiB 上限返回 413
+    const { downgradedImages, estimatedBytes } = fitRequestBudget(
+      body,
+      REQUEST_BUDGET_BYTES
+    );
+    if (import.meta.env.DEV) {
+      const mib = (estimatedBytes / (1024 * 1024)).toFixed(2);
+      console.info(
+        `[aiApi] 请求体 ${mib} MiB / 预算 ${
+          REQUEST_BUDGET_BYTES / (1024 * 1024)
+        } MiB` +
+          (downgradedImages > 0
+            ? `，已降级 ${downgradedImages} 张历史图片`
+            : '')
+      );
+    }
+
     const response = await fetch(API_URL, {
       method: 'POST',
       headers: {
@@ -236,14 +268,12 @@ export async function sendMessageToAI(
   model: string
 ): Promise<string> {
   return new Promise((resolve, reject) => {
-    let fullContent = '';
-    
     sendMessageStream(
       messages,
       model,
       {
-        onChunk: (chunk) => {
-          fullContent += chunk;
+        onChunk: () => {
+          // 流式增量会由 onComplete 的完整内容覆盖，这里不需要累积
         },
         onComplete: (content) => {
           resolve(content);
