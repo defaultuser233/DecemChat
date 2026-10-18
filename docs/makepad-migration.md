@@ -1217,6 +1217,9 @@ script_apply_eval!(cx, send_button, { draw_icon +: { color: #(icon_color) } });
 `clip_x/clip_y: false`，否则溢出部分被裁。颜色 `#x22C55E`、描边
 `palette().bg`（深色 `#000000` / 浅色 `#F2F2F2`）、圆角 6 本来就对。
 
+> **本节已被 §26.2 取代**：`padding 40 - 30 = 10` 会把 12px 的点压成 10px，
+> 视觉上偏小。现在改成 16px + 42×42 定位层 + `align`（无 padding）。
+
 ### 25.5 输入框文字
 
 核对后**无需改动**：`font_size: 14`、`padding: 8/10`、
@@ -1235,3 +1238,86 @@ script_apply_eval!(cx, send_button, { draw_icon +: { color: #(icon_color) } });
   抽屉「切换模型」是小机器人。
 - 已知差异：attached 图片键 hover 时网页版会把图标染成 `#F38181`，
   现在只有 hover 底色变、图标色不变（`draw_icon` 拿不到按钮的 hover 状态）。
+
+## 26. 打字机、在线点与抽屉图标收尾（2026-10-18）
+
+### 26.1 打字机（received / streaming 分离）
+
+网页版 `src/hooks/useChat.ts` 是「整段收完后按 8ms/字逐字贴进气泡」。
+此前本版把每个 SSE delta 直接写进显示文本，上游一快就整段蹦出。
+现在 `Chat` 拆成两个字段：
+
+| 字段 | 含义 |
+| --- | --- |
+| `received` | `poll_worker` 只往这里追加 delta，是上游已送到的全文 |
+| `streaming` | 已经贴到气泡里的前缀，永远是 `received` 的字节前缀 |
+| `upstream_done` | 上游已 Done；打字机继续把余下字符打完才收尾 |
+
+- 节拍：`cx.start_interval(0.016)`（60Hz），每拍按
+  `16ms / 8ms = 2` 字推进，UTF-8 安全（`typewriter_span` 用 `char_indices`）。
+  没有待打字符时不重绘。没有为它再开 1kHz 定时器。
+- 收尾：`Done` 只置 `upstream_done`，`tick_typewriter` 在
+  `streaming.len() >= received.len()` 时才调 `finish_stream()`。
+  `finish_stream` 只提交**已显示**的 `streaming`，所以 Esc 取消时
+  上游多送的一截不会突然补出来。
+- Markdown 自带的 `start_streaming_animation()`（整段排版后淡入）不再调用，
+  只在流式项新建时 `stop_streaming_animation()` 清掉可能残留的状态。
+- 光标：7×15、`#F38181`、圆角 1.5，`0.8s step-end`（每 0.4s 翻转）。
+  用 `CURSOR_ON: AtomicBool` 在 App 定时器里写、ChatList 绘制时读。
+  它是 Char 模板里的 `stream_cursor`，默认 0×0/隐藏；流式时用
+  `Walk{abs_pos: Some(...)}` 放到最后一个字符右侧 2px。
+  **绝对定位的 walk 不参与流式布局**，因此不影响换行与气泡量宽。
+- 位置来源：先 `item_widget.draw_all_unscoped()` 画出正文，再用
+  `TextFlow::area().rect(cx)` 取当前帧矩形（`Area::rect` 只在本帧重绘后有效，
+  `platform/src/area.rs:403`；画之前读会得到 0，这是第一版光标不显示的原因）。
+  然后用 Markdown 自己的 `draw_text` + `text_style_normal`，按 `mspace_1=3px`
+  内宽重排当前文本，取最后一行 `origin_in_lpxs.x + width_in_lpxs`。
+  最后单独 `cursor.draw_all_unscoped(cx)` 画在正文之上。
+- 已知限制：x 用的是原始 Markdown 文本（含 `**` 等标记）的重排宽度；
+  纯文本聊天准确，粗体/行内代码混排时可能有几像素偏差。y 取 TextFlow 区域底部，
+  与最后一行对齐。光标只在流式中出现，结束后随流式项一起消失。
+
+### 26.2 在线绿点改为 16×16
+
+旧写法 `40×40` 定位层 + `padding left/top 30`，内框只剩 `10px`，
+12px 的子部件被压成 10px 且没有溢出 —— 这是它看起来偏小的原因。
+现在：
+
+- 定位层 `42×42`（= 40 + 右/下各溢出 2），`flow: Down` +
+  `align: Align{x:1, y:1}`，**不用 padding**，子部件不会被缩小。
+- 绿点 `16×16`、2px `palette().bg` 描边、`border_radius: 8`（半宽）。
+- 两层都保留 `clip_x/clip_y: false`；42×42 层从头像原点开始，右下角
+  正好落在 `40 + 2` 的位置。
+
+### 26.3 抽屉最后三个分区图标换成 lucide
+
+新增 `resources/icons/user.svg`、`moon.svg`、`sun.svg`、`trash-2.svg`，
+均取自 lucide **0.562.0**，`include_bytes!` 嵌进二进制，经
+`install_icons` 注册为 `mod.decem_icons.user/moon/sun/trash`。
+
+- 静态图标用 `Svg { width:16 height:16 animating:false draw_svg +: {...} }`。
+  `Svg` **没有 `visible` 属性**（属性表里只有 width/height/abs_pos/…），
+  所以 sun/moon 各包一层 16×16 的 `View` 来显隐：
+  `sync_theme_ui` 只切换两个 View 的 visibility，不再写 FontAwesome 码位。
+- 颜色：user `#x95E1D3`、sun/moon `#xFCE38A`、trash `#xEF4444`。
+
+### 26.4 验证
+
+```text
+cargo check                                  → Finished dev profile
+cargo clippy --release --all-targets -- -D warnings → Finished release profile
+cargo fmt / cargo fmt --check                → FMT_OK
+cargo makepad desktop build -p decem-makepad --release → Finished release in 4.31s
+```
+
+- 深色 / 浅色各跑 7 秒后 kill：
+  `[E]` = 0、`font miss` = 0（两次独立运行都是）。
+- 打字机实测（kimi-cu，1470×1140）：发送
+  「用50字介绍你自己。」，0.4s 间隔连拍。0.4–1.2s 气泡是 `...`；
+  1.6s 只有「我是 Decem.」；2.0s 追加到「…准备捣乱～」；随后完整。
+  中途截图中最后一个字符右侧能看到 7×15 珊瑚色块光标，闪烁有亮/灭两态，
+  流式结束后消失。另按任务要求对长回复在 1.5s / 3s / 6s 各截一张：
+  1.5s 为 `...`、3s 为开头一小段、6s 为完整段，确认不是一次性蹦出。
+- 抽屉（深色/浅色各一张）：user 是描边人形、浅色模式显示太阳、
+  深色模式显示月亮、清空分区是描边垃圾桶；在线点明显比旧的 12px 大，
+  位于头像右下并溢出 2px。

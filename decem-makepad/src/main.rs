@@ -26,7 +26,7 @@ use makepad_base64::{base64_encode, BASE64_STANDARD};
 
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, OnceLock, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 app_main!(App);
 
@@ -88,24 +88,55 @@ fn now_hhmm() -> String {
 /// 全局聊天状态（照 aichat 的做法：`ChatList` 要在 `draw_walk` 里读它）。
 struct Chat {
     messages: Vec<Msg>,
+    /// 上游已经送到的全部文本（`poll_worker` 只往这里追加）。
+    received: String,
+    /// 已经由打字机贴到气泡里的前缀，`received` 的字节前缀。
     streaming: String,
     is_streaming: bool,
+    /// 上游已经 Done/Failed。为 true 时打字机继续把 `received` 的余下字符打完，
+    /// 追上之后才真正收尾（见 `tick_typewriter`）。
+    upstream_done: bool,
 }
 
 static CHAT: RwLock<Chat> = RwLock::new(Chat {
     messages: Vec::new(),
+    received: String::new(),
     streaming: String::new(),
     is_streaming: false,
+    upstream_done: false,
 });
 
 const WELCOME: &str = "🦊 狐狸来啦～ (≧▽≦)/～ ❤️ 你终于来找我玩啦！嗷呜～";
+
+/// 打字机节奏照网页版 `src/hooks/useChat.ts`：8ms/字（重新生成 12ms/字，
+/// 这里用同一个 8ms —— 上游再快也按这个速度贴字）。
+const TYPEWRITER_MS_PER_CHAR: f32 = 8.0;
+/// 60Hz 定时器：16ms 一拍，约 2 字/拍。没有待打字符时这一拍什么都不做。
+const TYPEWRITER_TICK: f64 = 0.016;
+
+/// 块光标 0.8s step-end = 每 0.4s 翻转一次显隐。
+const CURSOR_HALF_PERIOD: f32 = 0.4;
+/// 光标是否处于「亮」的那半周期。由 App 的定时器写，ChatList 画的时候读。
+static CURSOR_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// 从 `shown` 之后再取 `chars` 个字符的字节长度（不会落在 UTF-8 中间）。
+fn typewriter_span(received: &str, shown: &str, chars: usize) -> usize {
+    let rest = &received[shown.len()..];
+    rest.char_indices()
+        .take(chars)
+        .last()
+        .map(|(index, ch)| index + ch.len_utf8())
+        .unwrap_or(rest.len())
+}
 
 /// 往聊天里追一条 char 消息，并把流式状态收干净。
 /// 现阶段用它呈现错误（之后要不要单独的错误样式再定）。
 fn push_message(text: String) {
     let mut chat = CHAT.write().unwrap();
+    chat.received.clear();
     chat.streaming.clear();
     chat.is_streaming = false;
+    chat.upstream_done = false;
     chat.messages.push(Msg {
         role: Role::Char,
         text,
@@ -957,15 +988,80 @@ impl Widget for ChatList {
                         };
                         let mut markdown = item_widget.markdown(cx, ids!(selectable));
                         markdown.set_text(cx, text);
+                        // Markdown 自带的「逐字淡入」会先把整段排版好再淡出来，
+                        // 看起来仍是一次性蹦出；现在改由打字机控制字符数量，
+                        // 这里只负责把上一次可能残留的淡入停掉。
                         if just_started {
-                            markdown.reset_all_streaming_animations();
-                        } else {
-                            markdown.start_streaming_animation();
+                            markdown.stop_streaming_animation();
                         }
+                        // 光标是叠在正文上的独立部件：先在正文绘制期间隐藏，
+                        // 画完拿到 TextFlow 的当前矩形后再单独画一次。
+                        // （`Area::rect` 只在本帧该 Area 重绘过之后才有效，见
+                        //  platform/src/area.rs:403 —— 画之前读只会得到 0。）
+                        let cursor = item_widget.widget(cx, ids!(stream_cursor));
+                        cursor.set_visible(cx, false);
                         *BUBBLE_BODY.write().unwrap() =
                             Some((text.to_owned(), has_block_content(text)));
                         item_widget.draw_all_unscoped(cx);
                         *BUBBLE_BODY.write().unwrap() = None;
+
+                        if !chat.streaming.is_empty() {
+                            // 光标位置：用 Markdown 自己的 DrawText/TextStyle 把当前
+                            // 显示文本按同一内宽重排一次，取最后一行的行宽。
+                            // Markdown 的内距是 theme.mspace_1 = 3px（space_factor 6 的一半）。
+                            // 整个文本本来每帧也要被 Bubble 量一次宽，这次排版是同一量级。
+                            let cursor_point = markdown.borrow_mut().and_then(|mut md| {
+                                // `Markdown` 自己没实现 `WidgetNode::area()`（空的），
+                                // 真正由 `end_turtle_with_area` 记下矩形的是内层 TextFlow。
+                                let md_rect = md.text_flow.area().rect(cx);
+                                let scale = (md.text_flow.draw_text.font_scale as f64).max(0.0001);
+                                let inner_w = (md_rect.size.x - 6.0).max(1.0);
+                                let flow = &mut md.text_flow;
+                                std::mem::swap(
+                                    &mut flow.draw_text.text_style,
+                                    &mut flow.text_style_normal,
+                                );
+                                let laid = flow.draw_text.layout(
+                                    cx,
+                                    0.0,
+                                    0.0,
+                                    Some((inner_w / scale) as f32),
+                                    true,
+                                    Align::default(),
+                                    text,
+                                );
+                                std::mem::swap(
+                                    &mut flow.draw_text.text_style,
+                                    &mut flow.text_style_normal,
+                                );
+                                let row = laid.rows.last()?;
+                                Some(dvec2(
+                                    md_rect.pos.x
+                                        + 3.0
+                                        + (row.origin_in_lpxs.x + row.width_in_lpxs) as f64 * scale
+                                        + 2.0,
+                                    md_rect.pos.y + md_rect.size.y - 3.0 - 15.0,
+                                ))
+                            });
+                            if let Some(pos) = cursor_point {
+                                cursor.set_visible(
+                                    cx,
+                                    CURSOR_ON.load(std::sync::atomic::Ordering::Relaxed),
+                                );
+                                // `abs_pos` 是窗口绝对坐标，上面算出的正是窗口坐标。
+                                // 绝对定位的 walk 不参与流式布局，不影响换行与量宽。
+                                cursor.as_view().set_walk(
+                                    cx,
+                                    Walk {
+                                        width: Size::Fixed(7.0),
+                                        height: Size::Fixed(15.0),
+                                        abs_pos: Some(pos),
+                                        ..Walk::default()
+                                    },
+                                );
+                                cursor.draw_all_unscoped(cx);
+                            }
+                        }
                         continue;
                     }
 
@@ -1189,6 +1285,15 @@ pub struct App {
     /// 重绘对这层 3–6% 的光晕没必要，10 Hz 已经看不出跳变。
     #[rust]
     glow_timer: Option<Timer>,
+    /// 打字机的 60Hz 节拍。只在有待打字符或光标翻转时重绘。
+    #[rust]
+    type_timer: Option<Timer>,
+    /// 本轮流式开始的时间，光标闪烁相位从这里起算。
+    #[rust]
+    type_epoch: Option<Instant>,
+    /// 上一拍算出的光标显隐，用来判断闪烁是否需要重绘。
+    #[rust]
+    cursor_on: bool,
 }
 
 /// 文件对话框的 id，用来认出哪个对话框回了话。
@@ -1376,11 +1481,14 @@ impl App {
         self.ui
             .label(cx, ids!(theme_mode_label))
             .set_text(cx, if dark { "深色模式" } else { "浅色模式" });
+        // lucide 的 sun / moon 是两个独立 Svg 部件：运行时只切显隐，
+        // 不再改文本码位（FontAwesome 字形已全部退场）。
         self.ui
-            .label(cx, ids!(theme_mode_icon))
-            // 主题自带 FontAwesome 的单色字形：U+F186 = fa-moon（深色模式）、
-            // U+F185 = fa-sun（浅色模式）。彩色 emoji 的黄色由字体自带，`color` 染不上。
-            .set_text(cx, if dark { "\u{f186}" } else { "\u{f185}" });
+            .widget(cx, ids!(theme_icon_sun))
+            .set_visible(cx, !dark);
+        self.ui
+            .widget(cx, ids!(theme_icon_moon))
+            .set_visible(cx, dark);
     }
 
     /// 切换主题：先改全局状态（`script_mod` 重载时读它），落盘，再请求
@@ -1527,12 +1635,15 @@ impl App {
                 image,
                 time: now_hhmm(),
             });
+            chat.received.clear();
             chat.streaming.clear();
             chat.is_streaming = true;
+            chat.upstream_done = false;
 
             let payload = build_request_body(&chat.messages);
             (payload, chat.messages.len() + 1)
         };
+        self.start_typewriter_clock();
 
         // 预览图跟着清掉（空图要一起隐藏，否则会白占一块高度）
         let pending_photo = self.ui.image(cx, ids!(pending_photo));
@@ -1577,11 +1688,14 @@ impl App {
             // 丢掉该用户消息之后的 char 回复。egui 版同法；网页版只删最后一条，
             // 但失败提示也是 char 消息，删到最后一条用户消息为止更稳
             chat.messages.truncate(last_user + 1);
+            chat.received.clear();
             chat.streaming.clear();
             chat.is_streaming = true;
+            chat.upstream_done = false;
             let payload = build_request_body(&chat.messages);
             (payload, chat.messages.len() + 1)
         };
+        self.start_typewriter_clock();
 
         match payload {
             Ok(body) => self.worker = Some(Worker::spawn_chat(body)),
@@ -1605,8 +1719,10 @@ impl App {
         self.worker = None;
         {
             let mut chat = CHAT.write().unwrap();
+            chat.received.clear();
             chat.streaming.clear();
             chat.is_streaming = false;
+            chat.upstream_done = false;
             chat.messages.clear();
             chat.messages.push(Msg {
                 role: Role::Char,
@@ -1629,9 +1745,22 @@ impl App {
         cx.redraw_all();
     }
 
+    /// 光标闪烁相位从这一刻起算（每次 send / regenerate 重置）。
+    fn start_typewriter_clock(&mut self) {
+        self.type_epoch = Some(Instant::now());
+        self.cursor_on = true;
+        CURSOR_ON.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// 把「已经显示」的那部分定格成一条消息。
+    ///
+    /// **只提交 `streaming`（屏幕上真正贴出来的前缀）**，不提交 `received`：
+    /// Esc 取消时上游可能已经多送了一截，用户看到的才是应该留下的。
     fn finish_stream(&self) {
         let mut chat = CHAT.write().unwrap();
         let text = std::mem::take(&mut chat.streaming);
+        chat.received.clear();
+        chat.upstream_done = false;
         if !text.is_empty() {
             chat.messages.push(Msg {
                 role: Role::Char,
@@ -1641,6 +1770,71 @@ impl App {
             });
         }
         chat.is_streaming = false;
+    }
+
+    /// 打字机的一拍：把 `received` 里下一小段字符搬进 `streaming`。
+    ///
+    /// `upstream_done` 之后仍然继续搬，直到 `streaming == received` 才收尾——
+    /// 这就是「收完后也要继续把剩余字符打完」。
+    fn tick_typewriter(&mut self, cx: &mut Cx) {
+        let mut changed = false;
+        {
+            let mut chat = CHAT.write().unwrap();
+            if chat.is_streaming && chat.streaming.len() < chat.received.len() {
+                // 16ms 一拍 / 8ms 一字 = 2 字；按常量算，改节奏只需改上面两个数。
+                let chars_per_tick =
+                    (TYPEWRITER_TICK * 1000.0 / TYPEWRITER_MS_PER_CHAR as f64).round() as usize;
+                let span = typewriter_span(&chat.received, &chat.streaming, chars_per_tick.max(1));
+                if span > 0 {
+                    let start = chat.streaming.len();
+                    let end = start + span;
+                    // 拆开两个字段，避免同一把 guard 上同时可变/不可变借用
+                    let Chat {
+                        received,
+                        streaming,
+                        ..
+                    } = &mut *chat;
+                    streaming.push_str(&received[start..end]);
+                    changed = true;
+                }
+            }
+        }
+
+        let pending = {
+            let chat = CHAT.read().unwrap();
+            chat.is_streaming && chat.streaming.len() < chat.received.len()
+        };
+        let caught_up = {
+            let chat = CHAT.read().unwrap();
+            chat.is_streaming && chat.upstream_done && !pending
+        };
+        if caught_up {
+            self.finish_stream();
+            changed = true;
+        }
+
+        // 0.8s step-end：每 0.4s 翻一次。只有翻转的那一拍才需要重绘；
+        // 不在流式时不算相位，避免空闲期每 0.4s 白重绘一次。
+        let streaming = CHAT.read().unwrap().is_streaming;
+        let on = if streaming {
+            self.type_epoch
+                .map(|epoch| {
+                    let half = (epoch.elapsed().as_secs_f32() / CURSOR_HALF_PERIOD) as u64;
+                    half.is_multiple_of(2)
+                })
+                .unwrap_or(true)
+        } else {
+            true
+        };
+        if self.cursor_on != on {
+            self.cursor_on = on;
+            CURSOR_ON.store(on, std::sync::atomic::Ordering::Relaxed);
+            changed |= streaming;
+        }
+
+        if changed || pending {
+            cx.redraw_all();
+        }
     }
 
     fn poll_worker(&mut self, cx: &mut Cx) {
@@ -1653,20 +1847,23 @@ impl App {
         let mut failed = None;
         for event in events {
             match event {
+                // 只入「已收到」，屏幕上的文本由 `tick_typewriter` 按节奏搬。
                 WorkerEvent::Delta(delta) => {
-                    CHAT.write().unwrap().streaming.push_str(&delta);
+                    CHAT.write().unwrap().received.push_str(&delta);
                 }
                 WorkerEvent::Done => done = true,
                 WorkerEvent::Failed(reason) => failed = Some(reason),
             }
         }
         if let Some(reason) = failed {
-            // 已经流出来的部分照样定格，失败原因单独作为一条消息
+            // 已经贴出来的部分照样定格，失败原因单独作为一条消息。
+            // 不把 received 里没打完的尾巴倒出来——那会破坏打字机效果。
             self.finish_stream();
             push_message(format!("⚠️ {reason}"));
             self.worker = None;
         } else if done {
-            self.finish_stream();
+            // 不在这里收尾：打字机还要把余下字符打完（`tick_typewriter`）。
+            CHAT.write().unwrap().upstream_done = true;
             self.worker = None;
         }
         if had_events {
@@ -1815,8 +2012,12 @@ const ICON_GITHUB_SVG: &[u8] = include_bytes!("../resources/icons/github.svg");
 const ICON_IMAGE_SVG: &[u8] = include_bytes!("../resources/icons/image.svg");
 const ICON_SEND_SVG: &[u8] = include_bytes!("../resources/icons/send.svg");
 const ICON_BOT_SVG: &[u8] = include_bytes!("../resources/icons/bot.svg");
+const ICON_USER_SVG: &[u8] = include_bytes!("../resources/icons/user.svg");
+const ICON_MOON_SVG: &[u8] = include_bytes!("../resources/icons/moon.svg");
+const ICON_SUN_SVG: &[u8] = include_bytes!("../resources/icons/sun.svg");
+const ICON_TRASH_SVG: &[u8] = include_bytes!("../resources/icons/trash-2.svg");
 
-/// 把六个 SVG 注册成内存资源，挂到 `mod.decem_icons`。
+/// 把十个 SVG 注册成内存资源，挂到 `mod.decem_icons`。
 ///
 /// 与 `install_web_fonts` 同一套路：`res.binary_resource`（`res.rs:1186-1218`）
 /// 建一个 `binary://` 资源，数据直接是内存字节；`DrawSvg::load_svg`
@@ -1836,6 +2037,10 @@ fn install_icons(vm: &mut ScriptVm) {
             (id!(image_svg), ICON_IMAGE_SVG),
             (id!(send_svg), ICON_SEND_SVG),
             (id!(bot_svg), ICON_BOT_SVG),
+            (id!(user_svg), ICON_USER_SVG),
+            (id!(moon_svg), ICON_MOON_SVG),
+            (id!(sun_svg), ICON_SUN_SVG),
+            (id!(trash_svg), ICON_TRASH_SVG),
         ] {
             let bytes: ScriptValue = vm.bx.heap.new_array_from_vec_u8(bytes.to_vec()).into();
             vm.set_injected_global(name, bytes);
@@ -1848,6 +2053,10 @@ fn install_icons(vm: &mut ScriptVm) {
                 image: mod.res.binary_resource(image_svg)
                 send: mod.res.binary_resource(send_svg)
                 bot: mod.res.binary_resource(bot_svg)
+                user: mod.res.binary_resource(user_svg)
+                moon: mod.res.binary_resource(moon_svg)
+                sun: mod.res.binary_resource(sun_svg)
+                trash: mod.res.binary_resource(trash_svg)
             }
         });
         let _ = EMBEDDED.set(());
@@ -2001,6 +2210,16 @@ impl AppMain for App {
             .is_some_and(|timer| timer.is_event(event).is_some())
         {
             cx.redraw_all();
+        }
+        // 打字机 60Hz（16ms/拍）。空闲时这一拍直接返回，不重绘。
+        if self.type_timer.is_none() && matches!(event, Event::Startup | Event::Draw(_)) {
+            self.type_timer = Some(cx.start_interval(TYPEWRITER_TICK));
+        }
+        if self
+            .type_timer
+            .is_some_and(|timer| timer.is_event(event).is_some())
+        {
+            self.tick_typewriter(cx);
         }
         self.match_event(cx, event);
         if let Event::Actions(actions) = event {
@@ -2238,6 +2457,18 @@ script_mod! {
                             }
                         }
                     }
+                }
+
+                // 打字机块光标：7×15、珊瑚色、0.8s step-end。默认 0×0 且隐藏，
+                // 流式时由 Rust 用 `abs_pos` 摆到最后一个字符右侧 2px ——
+                // 绝对定位的 walk 不参与流式布局，所以不影响换行与气泡量宽。
+                stream_cursor := RoundedView {
+                    width: 0
+                    height: 0
+                    visible: false
+                    show_bg: true
+                    draw_bg.color: #xF38181
+                    draw_bg.border_radius: uniform(1.5)
                 }
 
                 // 时间戳在气泡**下方**（规格 §3）。左缩进 52 = 头像 40 + 间距 12，
@@ -2589,26 +2820,32 @@ script_mod! {
                                             }
                                         }
 
-                                        // 12×12 在线绿 + 2px 背景色描边（规格 §2）。
+                                        // 16×16 在线绿 + 2px 背景色描边（规格 §2）。
                                         // 踩过两次：Overlay 里的 `margin` 不保证偏移；`abs_pos` 是
-                                        // **窗口绝对坐标**（会把点甩到窗口左上角）。所以用一个
-                                        // 与头像同尺寸的定位层，靠 `padding` 把点推到右下。
+                                        // **窗口绝对坐标**（会把点甩到窗口左上角）。
+                                        //
+                                        // 现在用 42×42 的定位层（40 + 右/下各溢出 2）+
+                                        // `align: {x:1, y:1}` 把 16px 的点贴到层右下角。
+                                        // 不用 padding：padding 会先缩小可用内框，旧写法
+                                        // `40 - 30 = 10 < 12`，点被压成 10px 且没有溢出 ——
+                                        // 这正是它看起来偏小的原因。align 不会缩子部件尺寸。
                                         View {
-                                            width: 40
-                                            height: 40
+                                            width: 42
+                                            height: 42
                                             flow: Down
-                                            padding: Inset{left: 30 top: 30}
+                                            align: Align{x: 1.0, y: 1.0}
                                             clip_x: false
                                             clip_y: false
 
                                             RoundedView {
-                                                width: 12
-                                                height: 12
+                                                width: 16
+                                                height: 16
                                                 show_bg: true
                                                 draw_bg.color: #x22C55E
                                                 draw_bg.border_size: 2.0
                                                 draw_bg.border_color: #(palette().bg)
-                                                draw_bg.border_radius: uniform(6.0)
+                                                // 半径 = 半宽
+                                                draw_bg.border_radius: uniform(8.0)
                                             }
                                         }
                                     }
@@ -3277,15 +3514,15 @@ script_mod! {
                                                 spacing: 8.
                                                 align: Align{y: 0.5}
 
-                                                // U+F007 = FontAwesome 的 fa-user，单色、跟随薄荷色
-                                                Label {
-                                                    width: Fit
-                                                    height: Fit
-                                                    padding: 0
-                                                    text: "\u{f007}"
-                                                    draw_text +: {
+                                                // lucide `user`，单色、跟随薄荷色
+                                                Svg {
+                                                    width: 16
+                                                    height: 16
+                                                    // 静态图标：不要每帧申请 next_frame
+                                                    animating: false
+                                                    draw_svg +: {
+                                                        svg: mod.decem_icons.user
                                                         color: #x95E1D3
-                                                        text_style: theme.font_icons{font_size: 16}
                                                     }
                                                 }
 
@@ -3435,15 +3672,39 @@ script_mod! {
                                                 spacing: 8.
                                                 align: Align{y: 0.5}
 
-                                                // 文字由 Rust 侧写入：U+F186 = fa-moon / U+F185 = fa-sun
-                                                theme_mode_icon := Label {
-                                                    width: Fit
-                                                    height: Fit
-                                                    padding: 0
-                                                    text: ""
-                                                    draw_text +: {
-                                                        color: #xFCE38A
-                                                        text_style: theme.font_icons{font_size: 16}
+                                                // 两个 lucide 图标按模式显隐（Rust 侧
+                                                // `sync_theme_ui` 切换）——不再改文本码位。
+                                                // Svg 没有 `visible` 属性（属性列表里只有
+                                                // width/height/…），所以各包一层 View 来隐藏。
+                                                // 默认深色，所以先显示 moon。
+                                                theme_icon_sun := View {
+                                                    width: 16
+                                                    height: 16
+                                                    visible: false
+
+                                                    Svg {
+                                                        width: 16
+                                                        height: 16
+                                                        animating: false
+                                                        draw_svg +: {
+                                                            svg: mod.decem_icons.sun
+                                                            color: #xFCE38A
+                                                        }
+                                                    }
+                                                }
+
+                                                theme_icon_moon := View {
+                                                    width: 16
+                                                    height: 16
+
+                                                    Svg {
+                                                        width: 16
+                                                        height: 16
+                                                        animating: false
+                                                        draw_svg +: {
+                                                            svg: mod.decem_icons.moon
+                                                            color: #FCE38A
+                                                        }
                                                     }
                                                 }
 
@@ -3566,15 +3827,14 @@ script_mod! {
                                                 spacing: 8.
                                                 align: Align{y: 0.5}
 
-                                                // U+F2ED = FontAwesome 的 fa-trash-can，单色、跟随警示红
-                                                Label {
-                                                    width: Fit
-                                                    height: Fit
-                                                    padding: 0
-                                                    text: "\u{f2ed}"
-                                                    draw_text +: {
+                                                // lucide `trash-2`，单色、跟随警示红
+                                                Svg {
+                                                    width: 16
+                                                    height: 16
+                                                    animating: false
+                                                    draw_svg +: {
+                                                        svg: mod.decem_icons.trash
                                                         color: #xEF4444
-                                                        text_style: theme.font_icons{font_size: 16}
                                                     }
                                                 }
 
