@@ -1378,9 +1378,9 @@ impl App {
             .set_text(cx, if dark { "深色模式" } else { "浅色模式" });
         self.ui
             .label(cx, ids!(theme_mode_icon))
-            // 自带字体缺 ☾/☀ 这类几何符号（会显示成豆腐块），用彩色 emoji：
-            // 与 ✨/🦊 同一套字形，颜色由 emoji 字体自带（黄色）。
-            .set_text(cx, if dark { "🌙" } else { "☀️" });
+            // 主题自带 FontAwesome 的单色字形：U+F186 = fa-moon（深色模式）、
+            // U+F185 = fa-sun（浅色模式）。彩色 emoji 的黄色由字体自带，`color` 染不上。
+            .set_text(cx, if dark { "\u{f186}" } else { "\u{f185}" });
     }
 
     /// 切换主题：先改全局状态（`script_mod` 重载时读它），落盘，再请求
@@ -2565,17 +2565,17 @@ script_mod! {
                                                 }
                                             }
 
-                                            // Sparkles：Makepad 没有随包 SVG 图标集，
-                                            // 用 sparkles 字符代替（16px；该字形来自彩色 emoji 字体，
-                                            // 颜色固定为 emoji 自带的黄，`color` 只影响其轮廓）
+                                            // Sparkles：U+F72B = FontAwesome 的 fa-wand-sparkles。
+                                            // 用 `theme.font_icons`（单色）而不是 ✨：彩色 emoji 的
+                                            // 黄色由字体自带，`color` 只影响轮廓。
                                             Label {
                                                 width: Fit
                                                 height: Fit
                                                 padding: 0
-                                                text: "✨"
+                                                text: "\u{f72b}"
                                                 draw_text +: {
                                                     color: #xFCE38A
-                                                    text_style: theme.font_regular{font_size: 16}
+                                                    text_style: theme.font_icons{font_size: 16}
                                                 }
                                             }
                                         }
@@ -2744,7 +2744,7 @@ script_mod! {
                                     align: Align{y: 0.5}
 
                                     // 胶囊：56 高 = 40 内容 + 上下各 8 内距。
-                                    // 内部一条 Right 行：[🖼] [input Fill] [↑]（规格 §4）。
+                                    // 内部一条 Right 行：[fa-image] [input Fill] [↑]（规格 §4）。
                                     // 胶囊外的 Overlay 只用来叠聚焦描边。
                                     pill := View {
                                         width: Fill
@@ -2767,8 +2767,10 @@ script_mod! {
                                             // 图片按钮在胶囊内部、输入框左侧（规格 §4）。
                                             // 按钮不是 Image，进输入行不会经 NaN 弄坏
                                             // TextInput 的命中区（迁移文档 §12 只针对 Image）。
+                                            // U+F03E = FontAwesome 的 fa-image，单色、
+                                            // 用 `theme.font_icons` 而不是彩色 emoji 🖼。
                                             attach_button := glass.Button {
-                                                text: "🖼"
+                                                text: "\u{f03e}"
                                                 width: 40
                                                 height: 40
                                                 padding: 0
@@ -2776,7 +2778,7 @@ script_mod! {
                                                     color: #(palette().muted_fg)
                                                     color_hover: #xF38181
                                                     color_down: #xF38181
-                                                    text_style: theme.font_regular{font_size: 18}
+                                                    text_style: theme.font_icons{font_size: 18}
                                                 }
                                                 draw_bg +: {
                                                     border_size: 0.0
@@ -2998,14 +3000,16 @@ script_mod! {
                                                 spacing: 8.
                                                 align: Align{y: 0.5}
 
+                                                // U+F074 = FontAwesome 的 fa-shuffle（原 ⇄ 是普通文字箭头，
+                                                // 缺字时同样会变豆腐块，统一换成主题图标字体）
                                                 Label {
                                                     width: Fit
                                                     height: Fit
                                                     padding: 0
-                                                    text: "⇄"
+                                                    text: "\u{f074}"
                                                     draw_text +: {
                                                         color: #xF38181
-                                                        text_style: theme.font_regular{font_size: 16}
+                                                        text_style: theme.font_icons{font_size: 16}
                                                     }
                                                 }
 
@@ -3201,14 +3205,15 @@ script_mod! {
                                                 spacing: 8.
                                                 align: Align{y: 0.5}
 
+                                                // U+F007 = FontAwesome 的 fa-user，单色、跟随薄荷色
                                                 Label {
                                                     width: Fit
                                                     height: Fit
                                                     padding: 0
-                                                    text: "👤"
+                                                    text: "\u{f007}"
                                                     draw_text +: {
                                                         color: #x95E1D3
-                                                        text_style: theme.font_regular{font_size: 16}
+                                                        text_style: theme.font_icons{font_size: 16}
                                                     }
                                                 }
 
@@ -3350,7 +3355,7 @@ script_mod! {
                                             flow: Down
                                             spacing: 8.
 
-                                            // 分区标题：16px 黄色月亮/太阳 + 14px 文字
+                                            // 分区标题：16px 黄色月亮/太阳（FontAwesome 单色）+ 14px 文字
                                             View {
                                                 width: Fill
                                                 height: Fit
@@ -3358,6 +3363,7 @@ script_mod! {
                                                 spacing: 8.
                                                 align: Align{y: 0.5}
 
+                                                // 文字由 Rust 侧写入：U+F186 = fa-moon / U+F185 = fa-sun
                                                 theme_mode_icon := Label {
                                                     width: Fit
                                                     height: Fit
@@ -3365,7 +3371,7 @@ script_mod! {
                                                     text: ""
                                                     draw_text +: {
                                                         color: #xFCE38A
-                                                        text_style: theme.font_regular{font_size: 16}
+                                                        text_style: theme.font_icons{font_size: 16}
                                                     }
                                                 }
 
@@ -3473,7 +3479,7 @@ script_mod! {
 
                                         // ── 第 4 段：清空聊天记录（§5-4）
                                         // 危险操作从输入区移到这里：输入胶囊内部只剩
-                                        // [🖼] [input] [↑]（规格 §4），清空属于设置。
+                                        // [fa-image] [input] [↑]（规格 §4），清空属于设置。
                                         View {
                                             width: Fill
                                             height: Fit
@@ -3488,14 +3494,15 @@ script_mod! {
                                                 spacing: 8.
                                                 align: Align{y: 0.5}
 
+                                                // U+F2ED = FontAwesome 的 fa-trash-can，单色、跟随警示红
                                                 Label {
                                                     width: Fit
                                                     height: Fit
                                                     padding: 0
-                                                    text: "🗑"
+                                                    text: "\u{f2ed}"
                                                     draw_text +: {
                                                         color: #xEF4444
-                                                        text_style: theme.font_regular{font_size: 16}
+                                                        text_style: theme.font_icons{font_size: 16}
                                                     }
                                                 }
 

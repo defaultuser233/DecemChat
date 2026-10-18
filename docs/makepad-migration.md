@@ -850,8 +850,9 @@ Makepad 自带的 `Icon` 部件要 `crate_resource("self:resources/xxx.svg")`：
 | 顶栏设置按钮 | `⚙︎` emoji（蓝，染不上色） | `\u{f013}` fa-gear，18px，`palette().muted_fg`，hover 变 `palette().fg` |
 | 抽屉「当前」徽章 / 模型行徽章 | `👁` emoji | `\u{f06e}` fa-eye，11px，`#x4DB6AC` |
 
-顶栏 `✨` 留 emoji：FA 免费集里没有 sparkles 字形，最近的 `fa-star`(f005)
-会换成另一个图标的语义，不动。抽屉里剩下的 `🔀 👤 🌙` 同理，后续要换时照这张表加。
+~~顶栏 `✨` 留 emoji~~：这条判断后来证明是错的 —— `fa-solid-900.ttf` 的 cmap 里
+**有** `fa-wand-sparkles`（U+F72B），只是当时没查。`✨` 与抽屉里剩下的
+`⇄ 👤 🌙 🗑`、输入胶囊的 `🖼` 已在 §24 一并换成单色字形。
 
 ### 21.3 验证
 
@@ -924,8 +925,8 @@ scrim + content）。原来 `clear_confirm` 写在 `settings_drawer` **前面**�
   点胶囊内 `🖼` 弹出系统「选一张图」对话框，Esc 取消；
   设置抽屉 → `清空记录` → 二次确认压在抽屉之上 → 取消 → 聊天记录仍在；
   深浅色切换（深→浅→深）正常，红色按钮采样 `#EF4444`。
-- 残留差异：无渐变文字、无 backdrop blur；`🗑` 用系统 emoji 字形，
-  与网页版的 lucide Trash2 形状不同（路径不同，色值一致）。
+- 残留差异：无渐变文字、无 backdrop blur；清空区的垃圾桶现在是 FA
+  `fa-trash-can`（§24），与网页版的 lucide Trash2 形状仍不同（色值一致）。
 
 ## 23. 拉丁字体对齐网页版：Lato / Poppins / Fira Code（2026-10-18，已实装）
 
@@ -1005,3 +1006,65 @@ Google Fonts 的 `css2` 接口现在对任何 UA 都发 woff/woff2，所以取�
   `font_bold` 固定用 Lato Bold 700 或 Poppins SemiBold 600。
 - 斜体（`font_italic` / `font_bold_italic`）仍是 IBM Plex Italic，没有换 Lato Italic。
 - 代码块里的中文注释走 LXGW（Fira Code 无 CJK），行高和网页版略有差别。
+
+## 24. 剩余彩色 emoji 图标全部换成 FontAwesome 单色字形（2026-10-18）
+
+只改 `decem-makepad/src/main.rs`。做法与 §21.2 相同：`text: "\u{fxxx}"` +
+`text_style: theme.font_icons{...}`，`color` / `color_hover` 直接染单色字形，
+尺寸与布局不变。
+
+### 24.1 字形存在性（先查再写）
+
+用 `fontTools` 读主题实际加载的那份字体
+`cargo/git/checkouts/makepad-ec2f134f34cd9f98/71c9ddc/widgets/resources/fa-solid-900.ttf`：
+
+```text
+0xf007 True user
+0xf185 True sun
+0xf186 True moon
+0xf2ed True trash-can
+0xf074 True shuffle
+0xf72b True wand-sparkles
+0xf03e True image
+```
+
+（`f72b` 说明 §21.2 里「FA 免费集没有 sparkles」的判断是错的。）
+
+### 24.2 替换表
+
+| 位置 | 原来 | 现在 |
+| --- | --- | --- |
+| 顶栏标题旁 | `✨` 彩色 emoji | `\u{f72b}` fa-wand-sparkles，16px，`#xFCE38A` |
+| 抽屉「切换模型」 | `⇄`（普通文字箭头，不是 emoji，但缺字会成豆腐块） | `\u{f074}` fa-shuffle，16px，`#xF38181` |
+| 抽屉「更改头像」 | `👤` emoji | `\u{f007}` fa-user，16px，`#x95E1D3` |
+| 抽屉「深色/浅色模式」 | `🌙` / `☀️` emoji（Rust 侧 `sync_theme_ui` 写入） | `\u{f186}` fa-moon / `\u{f185}` fa-sun，16px，`#xFCE38A` |
+| 抽屉「清空聊天记录」 | `🗑` emoji | `\u{f2ed}` fa-trash-can，16px，`#xEF4444` |
+| 输入胶囊「图片」按钮 | `🖼` emoji | `\u{f03e}` fa-image，18px，`palette().muted_fg`，hover `#F38181` |
+
+关键点：**`theme_mode_icon` 的 `text_style` 必须同时从 `font_regular` 换到
+`font_icons`**，否则 Rust 写进去的 `\u{f186}` 会用 Lato 渲染成豆腐块。
+
+抽屉页脚只有 `Ave atque vale` 文字（`footer_glow()` 取色），没有 emoji，未动。
+
+### 24.3 验证
+
+- `cargo check`、`cargo clippy --release --all-targets -- -D warnings`、
+  `cargo fmt`、`cargo makepad desktop build -p decem-makepad --release` 全绿。
+- 深色 / 浅色各启动 7 秒后 kill，日志 `grep -a "\[E\]"` 与
+  `grep -ai "font miss"` 均为空。
+- 截图（kimi-cu，1470×1140）逐个确认：wand-sparkles / shuffle / user / moon /
+  sun / trash-can / image 都是单色字形，没有豆腐块，也不是彩色 emoji。
+- 像素采样（PowerShell `System.Drawing`，按区域背景色做阈值取「墨色」像素，
+  再统计色相直方图）：每个图标的墨色**全部落在同一个 30° 色相桶**里，
+  深/浅两套模式均如此——即单色或抗锯齿混色，不存在彩色 emoji 的多色调。
+
+| 图标（浅色模式） | 墨色均值 | 色相桶 |
+| --- | --- | --- |
+| 顶栏 sparkle | `#B09E62`（被抽屉遮罩压暗的 `#FCE38A`） | 30° ×247 |
+| shuffle | `#F38989` | 0° ×348 |
+| user | `#96E1D3` | 150° ×420 |
+| sun | `#FCE38D` | 30° ×512 |
+| trash-can | `#EF5050` | 0° ×638 |
+| image | `#4B4B4B` | 0° ×615 |
+
+- 交互回归：齿轮开抽屉、深浅色来回切、点图片按钮弹窗，均正常；主题切回深色后退出。
