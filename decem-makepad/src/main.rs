@@ -1112,6 +1112,11 @@ impl Widget for ChatList {
                                 }
                             }
                         }
+                        // 正常消息与流式消息共用 Char 模板：必须显式把光标藏起来，
+                        // 否则流式结束后那个 7×15 的块会停在原地（踩过）。
+                        item_widget
+                            .widget(cx, ids!(stream_cursor))
+                            .set_visible(cx, false);
                         *BUBBLE_BODY.write().unwrap() =
                             Some((msg.text.clone(), wants_full_width(msg)));
                         item_widget.draw_all_unscoped(cx);
