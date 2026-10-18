@@ -926,3 +926,82 @@ scrim + content）。原来 `clear_confirm` 写在 `settings_drawer` **前面**�
   深浅色切换（深→浅→深）正常，红色按钮采样 `#EF4444`。
 - 残留差异：无渐变文字、无 backdrop blur；`🗑` 用系统 emoji 字形，
   与网页版的 lucide Trash2 形状不同（路径不同，色值一致）。
+
+## 23. 拉丁字体对齐网页版：Lato / Poppins / Fira Code（2026-10-18，已实装）
+
+网页版三族字体（`src/index.css:1`）：正文 Lato、标题 Poppins、代码 Fira Code。
+Makepad 侧的做法：**字体字节 `include_bytes!` 进二进制 → 脚本侧 `res.binary_resource`
+注册成资源 → 改主题的 `font_family`**。中文与 emoji 靠保留原字体链成员。
+
+### 23.1 应用侧能注册自定义字体（证据）
+
+| 想干的事 | API | 位置 |
+|---|---|---|
+| 把内存里的字节变成脚本资源 | `res.binary_resource(u8_array)` | `platform/src/script/res.rs:1186-1190`（`id_lut!(binary_resource)` 起） |
+| 资源路径 → 字体字节 | `Cx::get_resource_font_bytes_by_path` | `platform/src/cx_api.rs:1043`：先读文件，失败再取 `binary://…` 的 `Loaded` 字节 |
+| `FontMember.res` → 成员 | `FontFamily` 的 `on_custom_apply` 用 `path_for_handle` 取 `abs_path` | `draw/src/shader/draw_text.rs:3836-3898` |
+| 主题字体来源 | `install_theme_fonts` 把 `font_regular/bold/…` 重写成 `FontSet` 的链 | `widgets/core/src/font_policy.rs:141` |
+| 深/浅色主题的字体表 | `font_regular` / `font_bold` / `font_code` / `font_icons` | `widgets/core/src/theme_desktop_dark.rs:646-681` |
+| 国际字体链（中文/emoji 的兜底） | `INTERNATIONAL_REGULAR` = IBM Plex → LXGW → NotoColorEmoji | `platform/src/font_policy.rs:338` |
+
+Rust 侧把 `Vec<u8>` 变成脚本数组：`vm.bx.heap.new_array_from_vec_u8(bytes)`，
+再 `vm.set_injected_global(id!(...), value)` 让 `script_eval!` 里能按名字取到。
+**不要**用 `script_eval!(vm, { mod.decem_fonts })` 探测是否已注册——读一个不存在的
+属性会打 `[E] property ... not found`，直接踩掉"日志无 `[E]`"的验收。
+
+### 23.2 格式：只能 TTF/OTF，不能 woff/woff2
+
+`draw/Cargo.toml:21` 的 `ttf-parser` 只开了 `gvar-alloc`，没有 `woff`/`woff2` feature；
+`FontFace::from_data_and_index` 会直接解析失败，该成员被当成不可用丢掉。
+Google Fonts 的 `css2` 接口现在对任何 UA 都发 woff/woff2，所以取回来要用 fontTools
+转回 TTF（`TTFont(x.woff).save(y.ttf)`，`flavor = None`）。
+
+拿的是 **latin 子集**（`unicode-range: U+0000-00FF, …U+2000-206F, U+2191, U+2193…`）：
+`→`(U+2192)、`✓` 之类不在里面，所以字体链里**必须保留 IBM Plex** 兜符号，否则变豆腐块。
+
+### 23.3 实现（`decem-makepad/src/main.rs`）
+
+- 四个常量 `LATO_REGULAR_TTF` / `LATO_BOLD_TTF` / `POPPINS_SEMIBOLD_TTF` /
+  `FIRA_CODE_REGULAR_TTF`（`include_bytes!("../resources/fonts/…")`）。
+- `install_web_fonts(vm)`：
+  1. `res.binary_resource` 建 `mod.decem_fonts`（lato_regular / lato_bold /
+     poppins_semibold / fira_code）。用 Rust 侧 `OnceLock` 保证只建一次——
+     样式重载会重跑 `script_mod`，但 heap 不重置（`ScriptVm::with_reload` 只翻 flag，
+     `platform/script/src/vm.rs:551`），重复建会每次切主题多留一份字体字节。
+  2. 用 `mod.theme.font_regular{font_family: FontFamily{…}}` **合并**式赋值
+     （不要新建 `TextStyle{…}`，否则字号/行距被重置）。
+- 链顺序（每个族都一样）：自定义拉丁字体 → IBM Plex（符号兜底）→ LXGW（中文）→
+  Noto Color Emoji（彩色 emoji）。四者都是 **eager 成员**，和
+  `FontSet::International` 原来的行为一致，不依赖 lazy 加载。
+- `font_code` = Fira Code → LiberationMono → LXGW → emoji。
+- 新增主题 token `theme.font_display`（Poppins）只给顶栏「Decem」和抽屉「设置」两个
+  标题用——网页版也只有 h1/h2 用 Poppins（`ChatInterface.tsx:117`、
+  `SettingsPanel.tsx:89`），正文/强调仍是 Lato 700。
+- **调用时机**：`install_web_fonts` 必须在 `makepad_widgets::script_mod` 之后
+  （主题与 `mod.res` 已就绪）、在 `makepad_code_editor::script_mod` **之前**
+  （CodeView 在那一刻就把 `theme.font_code` 抄进自己的 TextStyle），
+  更不能晚于本 crate 的 `script_mod!`。
+
+### 23.4 验证（2026-10-18）
+
+- `cargo check` / `cargo clippy --release --all-targets -- -D warnings` / `cargo fmt` 全绿；
+  `cargo makepad desktop build -p decem-makepad --release` 出包。
+- `MAKEPAD_TRACE_FONT_LOAD=1` 的加载日志确认字体真的来自内存：
+  `member=lato path=binary://1 bytes=72312`、`lato … binary://2 bytes=70576`、
+  `poppins … binary://3 bytes=151516`；代码块首次出现时 `fira … binary://4`。
+  中文/emoji 仍是 `LXGWWenKaiRegular.ttf`（19 MB）与 `NotoColorEmoji.ttf`（10.6 MB）。
+- `DECEM_THEME=dark` / `light` 各跑 7 秒后 kill：`[E]` 0 条、
+  `font miss`/`missing font`/`not packaged` 0 条。
+- `DECEM_STRESS=1` + 浅色：300 条「压测第 N 条：中文、全角标点？！～、emoji 🦊…」
+  全部正常——中文不是方块、🦊 仍是彩色（像素最大通道差 238）。
+- 截图采样顶栏「Decem」：175 种颜色、亮度 21…255，说明是抗锯齿的真实字形
+  （Poppins 的几何风格 D/e/m 与 IBM Plex 明显不同），不是纯色块或豆腐框。
+
+### 23.5 剩余差异
+
+- 只有 latin 子集：拉丁扩展、箭头等少见符号仍由 IBM Plex 出字形，字重/字形和
+  网页版不完全一致。
+- 网页版 `font-weight: 500/600` 的中间字重没有：Makepad 只按成员选字体，
+  `font_bold` 固定用 Lato Bold 700 或 Poppins SemiBold 600。
+- 斜体（`font_italic` / `font_bold_italic`）仍是 IBM Plex Italic，没有换 Lato Italic。
+- 代码块里的中文注释走 LXGW（Fira Code 无 CJK），行高和网页版略有差别。

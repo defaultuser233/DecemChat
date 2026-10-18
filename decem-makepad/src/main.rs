@@ -880,7 +880,9 @@ impl Widget for Bubble {
             let used = laid.size_in_lpxs.width as f64 * scale;
             // 余量：这只测量实例与 Markdown 的渲染实例不是同一个，
             // emoji 与字距会有几像素出入，不够余量就会提前折行
-            (used + self.pad_x + 8.0).clamp(60.0, cap)
+            // 余量：这只测量实例与 Markdown 的渲染实例不是同一个；换成 Lato 之后
+            // emoji 与字距的出入比 IBMPlex 时更大（8px 会让欢迎语提前折行），给到 16
+            (used + self.pad_x + 16.0).clamp(60.0, cap)
         };
 
         // 给子部件一个确定宽度：Markdown 的换行宽度就是从这里来的。
@@ -1786,6 +1788,84 @@ impl MatchEvent for App {
     }
 }
 
+/// 网页版用的拉丁字体（`src/index.css:1` 引的三族）：正文 Lato、标题 Poppins、
+/// 代码 Fira Code。文件是 Google Fonts 的 `latin` 子集转回 TTF（Makepad 的
+/// ttf-parser 不带 woff/woff2 解码），所以只覆盖 U+0000-00FF 与常用标点。
+const LATO_REGULAR_TTF: &[u8] = include_bytes!("../resources/fonts/Lato-Regular.ttf");
+const LATO_BOLD_TTF: &[u8] = include_bytes!("../resources/fonts/Lato-Bold.ttf");
+const POPPINS_SEMIBOLD_TTF: &[u8] = include_bytes!("../resources/fonts/Poppins-SemiBold.ttf");
+const FIRA_CODE_REGULAR_TTF: &[u8] = include_bytes!("../resources/fonts/FiraCode-Regular.ttf");
+
+/// 把嵌进二进制的字体注册成 Makepad 资源，并把主题里几个 `TextStyle` 的
+/// `font_family` 换成「自定义拉丁字体 + 原来的 IBM Plex + LXGW + Noto Color Emoji」。
+///
+/// 注册走脚本侧的 `res.binary_resource`（`platform/src/script/res.rs:1186`），
+/// 资源路径是 `binary://<id>`；`Cx::get_resource_font_bytes_by_path`
+/// （`platform/src/cx_api.rs:1043`）先试文件、失败再回落到这份内存字节，所以
+/// 运行时不需要源码树里的字体文件（Android 打包也一样）。
+///
+/// 每个族都保留原字体链：拉丁子集没有箭头等符号，仍要 IBM Plex 兜底；中文与
+/// emoji 由 LXGW / Noto Color Emoji 渲染——这就是 `FontSet::International`
+/// 原来的链条（`platform/src/font_policy.rs:338`），顺序不能丢。
+fn install_web_fonts(vm: &mut ScriptVm) {
+    // 样式重载会重跑 script_mod，但 heap 不重置：资源只建一次，
+    // 否则每切一次深浅色就多留一份字体字节。
+    // 用 Rust 侧的 flag 而不是脚本里读 `mod.decem_fonts`——读一个还不存在的
+    // 属性会打一条 `[E] property ... not found`，冒烟要求日志里没有 `[E]`。
+    static EMBEDDED: OnceLock<()> = OnceLock::new();
+    if EMBEDDED.get().is_none() {
+        for (name, bytes) in [
+            (id!(lato_regular_ttf), LATO_REGULAR_TTF),
+            (id!(lato_bold_ttf), LATO_BOLD_TTF),
+            (id!(poppins_semibold_ttf), POPPINS_SEMIBOLD_TTF),
+            (id!(fira_code_ttf), FIRA_CODE_REGULAR_TTF),
+        ] {
+            let bytes: ScriptValue = vm.bx.heap.new_array_from_vec_u8(bytes.to_vec()).into();
+            vm.set_injected_global(name, bytes);
+        }
+        script_eval!(vm, {
+            mod.decem_fonts = {
+                lato_regular: mod.res.binary_resource(lato_regular_ttf)
+                lato_bold: mod.res.binary_resource(lato_bold_ttf)
+                poppins_semibold: mod.res.binary_resource(poppins_semibold_ttf)
+                fira_code: mod.res.binary_resource(fira_code_ttf)
+            }
+        });
+        let _ = EMBEDDED.set(());
+    }
+
+    script_eval!(vm, {
+        use mod.text.*
+        // 用 `theme.x{...}` 合并而不是新建 TextStyle：字体大小、行距仍归主题管。
+        mod.theme.font_regular = mod.theme.font_regular{font_family: FontFamily{
+            lato := FontMember{res: mod.decem_fonts.lato_regular asc: 0.0 desc: 0.0}
+            plex := FontMember{res: mod.res.crate_resource("makepad_widgets:resources/IBMPlexSans-Text.ttf") asc: -0.1 desc: 0.0}
+            cjk := FontMember{res: mod.res.crate_resource("makepad_widgets:resources/LXGWWenKaiRegular.ttf") asc: 0.0 desc: 0.0}
+            emoji := FontMember{res: mod.res.crate_resource("makepad_widgets:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+        }}
+        mod.theme.font_bold = mod.theme.font_bold{font_family: FontFamily{
+            lato := FontMember{res: mod.decem_fonts.lato_bold asc: 0.0 desc: 0.0}
+            plex := FontMember{res: mod.res.crate_resource("makepad_widgets:resources/IBMPlexSans-SemiBold.ttf") asc: -0.1 desc: 0.0}
+            cjk := FontMember{res: mod.res.crate_resource("makepad_widgets:resources/LXGWWenKaiBold.ttf") asc: 0.0 desc: 0.0}
+            emoji := FontMember{res: mod.res.crate_resource("makepad_widgets:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+        }}
+        mod.theme.font_code = mod.theme.font_code{font_family: FontFamily{
+            fira := FontMember{res: mod.decem_fonts.fira_code asc: 0.0 desc: 0.0}
+            mono := FontMember{res: mod.res.crate_resource("makepad_widgets:resources/LiberationMono-Regular.ttf") asc: 0.0 desc: 0.0}
+            cjk := FontMember{res: mod.res.crate_resource("makepad_widgets:resources/LXGWWenKaiRegular.ttf") asc: 0.0 desc: 0.0}
+            emoji := FontMember{res: mod.res.crate_resource("makepad_widgets:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+        }}
+        // 网页版只在标题上用 Poppins（ChatInterface.tsx:117 的 h1、
+        // SettingsPanel.tsx:89 的 h2），正文与强调仍是 Lato。
+        mod.theme.font_display = mod.theme.font_bold{font_family: FontFamily{
+            poppins := FontMember{res: mod.decem_fonts.poppins_semibold asc: 0.0 desc: 0.0}
+            plex := FontMember{res: mod.res.crate_resource("makepad_widgets:resources/IBMPlexSans-SemiBold.ttf") asc: -0.1 desc: 0.0}
+            cjk := FontMember{res: mod.res.crate_resource("makepad_widgets:resources/LXGWWenKaiBold.ttf") asc: 0.0 desc: 0.0}
+            emoji := FontMember{res: mod.res.crate_resource("makepad_widgets:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+        }}
+    });
+}
+
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         // 深色沿用近黑 + 橙的 BlackOrange；浅色借 Windows 的浅色 sheet。
@@ -1799,6 +1879,9 @@ impl AppMain for App {
         // `desktop_style::handle_event` 装好的 sheet 不会被这里又盖回深色。
         desktop_style::install(vm, theme_stylesheet(theme_mode()));
         crate::makepad_widgets::script_mod(vm);
+        // 网页版字体的接入点：必须在 `makepad_code_editor::script_mod` 之前，
+        // CodeView 在那一刻就把 `theme.font_code` 抄进了自己的 TextStyle。
+        install_web_fonts(vm);
         // CodeView（带语法高亮的代码块）属于独立的 makepad-code-editor crate，
         // 必须先注册它的脚本部件，下面 script_mod! 里的 `use mod.widgets.CodeView` 才能解析
         makepad_code_editor::script_mod(vm);
@@ -2478,7 +2561,7 @@ script_mod! {
                                                 text: "Decem"
                                                 draw_text +: {
                                                     color: #(palette().fg)
-                                                    text_style: theme.font_bold{font_size: 18}
+                                                    text_style: theme.font_display{font_size: 18}
                                                 }
                                             }
 
@@ -2854,7 +2937,7 @@ script_mod! {
                                             text: "设置"
                                             draw_text +: {
                                                 color: #(palette().fg)
-                                                text_style: theme.font_bold{font_size: 18}
+                                                text_style: theme.font_display{font_size: 18}
                                             }
                                         }
 
