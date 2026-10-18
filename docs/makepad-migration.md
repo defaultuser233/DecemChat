@@ -382,8 +382,10 @@ Makepad 侧用 `default-features = false` 引入。
 用截断后的历史重新请求；`worker.is_some()` 守门（照 egui 版——网页版这里其实有缺陷）。
 请求体拼装抽成 `build_request_body`，send / regenerate 共用。
 
-**清空**：输入行最左的「清空」→ 内置 `Modal` 二次确认（取消 / 确认清空；
-遮罩与 Esc 由 Modal 的 `can_dismiss` 免费提供）→ 先 `worker.cancel()` 再清 messages、只留欢迎语。
+**清空**：内置 `Modal` 二次确认（取消 / 确认清空；遮罩与 Esc 由 Modal 的
+`can_dismiss` 免费提供）→ 先 `worker.cancel()` 再清 messages、只留欢迎语。
+入口最初是输入行最左的「清空」按钮，**2026-10-18 已按规格 §5-4 移进设置抽屉**
+（见 §22），`clear_chat` / `clear_confirm` 两段逻辑没有变。
 
 ### 11.1 两个「编译期看不见」的坑（务必记住）
 
@@ -507,7 +509,8 @@ extern "system" {
    View 默认 `event_order: Up`（`widgets/core/src/view.rs:41-47`），最后画的按钮先收事件，
    命中按下后 `t.handled` 会把事件占住，**输入框不会抢走发送键的点击**；
    文字区也不会被盖住，因为 `TextInput` 的右内距留了 8 + 40 + 8。
-   `Image` 仍然不能进 `flow: Right`（§12 的 NaN），「🖼」按钮继续放在胶囊外。
+   `Image` 仍然不能进 `flow: Right`（§12 的 NaN）。注意：**按钮不是 `Image`**，
+   「🖼」后来已按规格移进胶囊的 `flow: Right` 行（见 §22），输入框命中区正常。
 
 3. **空 `Image` 的预览位会把输入区撑高一大截。** 旧布局里 `pending_photo` 是
    `width: Fit / height: Fit / max_height: 120`，空纹理时高度落回 120（§12），
@@ -861,3 +864,65 @@ Makepad 自带的 `Icon` 部件要 `crate_resource("self:resources/xxx.svg")`：
 - `cargo check` / `cargo clippy --release --all-targets -- -D warnings` / `cargo fmt --check` 全绿；
   `DECEM_THEME=dark`、`light` 各启动 7 秒，日志无 `[E]`、无 `font miss`。
 - 交互回归：点输入框 → 中文输入 → Enter 发送 → SSE 逐字回复 → 代码块圆角/内距正确。
+
+## 22. 输入胶囊与「清空」迁移（2026-10-18）
+
+只改 `decem-makepad/src/main.rs`，目标是规格 §4 / §5 的布局：
+
+### 22.1 胶囊内部 `[🖼] [input Fill] [↑]`
+
+图片按钮从胶囊左侧外部挪进胶囊内的 `flow: Right` 行，放在 `TextInput` 之前；
+顺序是 `attach_button`（40×40）→ `input`（Fill）→ `send_button`（40×40）。
+§12 的 NaN 只来自 `Image`（`Fit` 轴 / 非输入部件的图片纹理），
+`glass.Button` 进输入行不会碰坏 `TextInput` 的命中区——实测点输入框能聚焦、
+能打字、Enter 能发（见 §22.4）。
+
+配色/形状不变：40×40、圆角 16、透明底、hover `rgba(243,129,129,0.1)` + 珊瑚字。
+胶囊本身仍是 56 高（40 内容 + 上下 8 内距）、`row_bg`、圆角 16；
+外层 `Overlay` 只剩聚焦描边这一层。
+
+### 22.2 抽屉第 4 段「清空聊天记录」+ 页脚
+
+按 §5 的段序放在「深色/浅色模式」之后：
+
+- 段标题：`🗑`（`#EF4444`，16px）+「清空聊天记录」（`palette().fg`，14px）
+- 按钮 `drawer_clear_button`：`glass.Button`，`height: 32`、圆角 10、
+  底 `#EF4444`（hover `#DC2626` / down `#B91C1C`）、白字 13px、文字「清空记录」
+- 按钮下方 12px `#B3B3B3`：「此操作不可撤销，将删除所有聊天记录」
+- 点击仍开**原来那个** `clear_confirm`；取消/确认的处理与 `clear_chat` 完全复用
+
+页脚「Ave atque vale」：顶部分隔线 + 18px 居中文字。网页版是
+`background-clip: text` 的珊瑚↔薄荷↔黄渐变 + 4s 位移/呼吸；Makepad 没有
+渐变裁剪文字，改成沿同一条渐变取一个**随时间移动的单色**（`footer_glow()`，
+4s 一循环）。重绘由既有的 10 Hz 光晕定时器驱动，不额外开定时器。
+
+抽屉内容变长后仍能在 980×760 窗口里完整放下（正常状态不滚动），
+模型列表展开时照旧会顶出内容（§16 的既有行为）。
+
+### 22.3 双 Modal 的层级：`clear_confirm` 必须声明在抽屉之后
+
+`Modal` 的 overlay 按**绘制顺序**叠放（`widgets/core/src/modal.rs` 的双 modal
+测试：后声明的那层在上面；`draw_walk` 里 `begin_overlay_reuse` 后直接画自己的
+scrim + content）。原来 `clear_confirm` 写在 `settings_drawer` **前面**，
+抽屉开着时把它整个盖住，按钮点不到。
+
+修法：把 `clear_confirm` 整块移到 `settings_drawer` 之后（仍是 Backdrop 的兄弟）。
+两个 modal 可以同时 open，关掉上面那个后下面的抽屉还在，取消清空后聊天记录保留。
+
+### 22.4 验证
+
+- `cargo check`、`cargo clippy --release --all-targets -- -D warnings`、`cargo fmt` 全绿。
+- `cargo makepad desktop build -p decem-makepad --release` 出包（**必须在
+  `decem-makepad/` 目录里跑**；在仓库根跑会报 `Failed to get crate dir`，
+  因为根 workspace 把该 crate `exclude` 了）。
+- `DECEM_THEME=dark` / `light` 各启动 7 秒后 kill，日志无 `[E]`。
+- 胶囊像素（PowerShell `System.Drawing`，1470×1140 截图）：
+  `x=5 → #101010`（输入区底）、`x=20/30/45/90/100/200 → #1B1B1B`（胶囊底）、
+  `x=60 → #89C2AC`（🖼 字形本身），说明按钮整块落在胶囊背景范围内；
+  `x=1420 → #202020`（禁用发送键）、`x=1456 → #101010`（胶囊外）。
+- 交互：点输入框 → 输入「布局自检：胶囊与抽屉」→ Enter 发出 → SSE 回复正常；
+  点胶囊内 `🖼` 弹出系统「选一张图」对话框，Esc 取消；
+  设置抽屉 → `清空记录` → 二次确认压在抽屉之上 → 取消 → 聊天记录仍在；
+  深浅色切换（深→浅→深）正常，红色按钮采样 `#EF4444`。
+- 残留差异：无渐变文字、无 backdrop blur；`🗑` 用系统 emoji 字形，
+  与网页版的 lucide Trash2 形状不同（路径不同，色值一致）。

@@ -472,6 +472,25 @@ fn palette() -> Palette {
     }
 }
 
+/// 页脚「Ave atque vale」的颜色。网页版是 90° 珊瑚↔薄荷↔黄渐变 +
+/// background-size 200% 的位移/呼吸动画；Makepad 没有「渐变裁剪到文字」，
+/// 这里沿同一条渐变取一个随时间移动的颜色点，4s 一循环（呼吸由 10 Hz
+/// 重绘驱动，与背景光晕同一套）。
+fn footer_glow() -> Vec4f {
+    const STOPS: [u32; 4] = [0xF38181FF, 0x95E1D3FF, 0xFCE38AFF, 0xF38181FF];
+    let phase = (glow_seconds() / 4.0).fract() * 3.0;
+    let index = (phase as usize).min(2);
+    let local = phase - index as f32;
+    let from = STOPS[index];
+    let to = STOPS[index + 1];
+    let channel = |shift: u32| {
+        let a = ((from >> shift) & 0xff) as f32;
+        let b = ((to >> shift) & 0xff) as f32;
+        (a + (b - a) * local) / 255.0
+    };
+    vec4(channel(24), channel(16), channel(8), 1.0)
+}
+
 /// 开关滑块位置：轨道 32 宽、滑块 16、上下留 1.2。
 fn switch_knob_left() -> f64 {
     if theme_mode() == ThemeMode::Dark {
@@ -1655,7 +1674,11 @@ impl MatchEvent for App {
         }
         // 清空聊天记录：先弹二次确认。Modal 的 can_dismiss 默认 true，
         // 点遮罩或 Esc 即取消，Modal 自己关，不用接 dismissed。
-        if self.ui.button(cx, ids!(clear_button)).clicked(actions) {
+        if self
+            .ui
+            .button(cx, ids!(drawer_clear_button))
+            .clicked(actions)
+        {
             self.ui.modal(cx, ids!(clear_confirm)).open(cx);
         }
         if self
@@ -2637,64 +2660,9 @@ script_mod! {
                                     spacing: 8.
                                     align: Align{y: 0.5}
 
-                                    // 清空放在最左：离「发送」最远，降低误触概率。
-                                    // 二次确认弹层见下面 body 末尾的 clear_confirm。
-                                    clear_button := glass.Button {
-                                        text: "清空"
-                                        width: 56
-                                        height: 40
-                                        padding: 0
-                                        draw_text +: {
-                                            color: #(palette().muted_fg)
-                                            color_hover: #xEF4444
-                                            color_down: #xEF4444
-                                            text_style: theme.font_regular{font_size: 12}
-                                        }
-                                        draw_bg +: {
-                                            border_size: 0.0
-                                            border_radius: uniform(16.0)
-                                            color: #x00000000
-                                            color_hover: #xEF44441A
-                                            color_down: #xEF44442E
-                                            border_color: #x00000000
-                                            border_color_hover: #x00000000
-                                            border_color_down: #x00000000
-                                            top_glint: #x00000000
-                                            inner_shadow: #x00000000
-                                        }
-                                    }
-
-                                    // 图片按钮：规格里它在胶囊内，但非输入部件进入输入行
-                                    // 会经 NaN 弄坏 TextInput 的命中区（见迁移文档 §12），
-                                    // 所以放在胶囊外、紧挨着胶囊左缘。
-                                    attach_button := glass.Button {
-                                        text: "🖼"
-                                        width: 40
-                                        height: 40
-                                        padding: 0
-                                        draw_text +: {
-                                            color: #(palette().muted_fg)
-                                            color_hover: #xF38181
-                                            color_down: #xF38181
-                                            text_style: theme.font_regular{font_size: 18}
-                                        }
-                                        draw_bg +: {
-                                            border_size: 0.0
-                                            border_radius: uniform(16.0)
-                                            color: #x00000000
-                                            color_hover: #xF381811A
-                                            color_down: #xF381812E
-                                            border_color: #x00000000
-                                            border_color_hover: #x00000000
-                                            border_color_down: #x00000000
-                                            top_glint: #x00000000
-                                            inner_shadow: #x00000000
-                                        }
-                                    }
-
                                     // 胶囊：56 高 = 40 内容 + 上下各 8 内距。
-                                    // 用 Overlay 而不是把发送按钮塞进 Right 行：
-                                    // 按钮要叠在输入框右端，同时不参与输入行的宽度计算。
+                                    // 内部一条 Right 行：[🖼] [input Fill] [↑]（规格 §4）。
+                                    // 胶囊外的 Overlay 只用来叠聚焦描边。
                                     pill := View {
                                         width: Fill
                                         height: 56
@@ -2712,6 +2680,34 @@ script_mod! {
                                             // 深色 rgba(38,38,38,0.5) / 浅色 muted/50
                                             draw_bg.color: #(palette().row_bg)
                                             draw_bg.border_radius: uniform(16.)
+
+                                            // 图片按钮在胶囊内部、输入框左侧（规格 §4）。
+                                            // 按钮不是 Image，进输入行不会经 NaN 弄坏
+                                            // TextInput 的命中区（迁移文档 §12 只针对 Image）。
+                                            attach_button := glass.Button {
+                                                text: "🖼"
+                                                width: 40
+                                                height: 40
+                                                padding: 0
+                                                draw_text +: {
+                                                    color: #(palette().muted_fg)
+                                                    color_hover: #xF38181
+                                                    color_down: #xF38181
+                                                    text_style: theme.font_regular{font_size: 18}
+                                                }
+                                                draw_bg +: {
+                                                    border_size: 0.0
+                                                    border_radius: uniform(16.0)
+                                                    color: #x00000000
+                                                    color_hover: #xF381811A
+                                                    color_down: #xF381812E
+                                                    border_color: #x00000000
+                                                    border_color_hover: #x00000000
+                                                    border_color_down: #x00000000
+                                                    top_glint: #x00000000
+                                                    inner_shadow: #x00000000
+                                                }
+                                            }
 
                                             // 14px、透明底、无边框；单行输入由 TextInput
                                             // 自己把字形垂直居中（text_input.rs:1717-1740）
@@ -2810,76 +2806,6 @@ script_mod! {
                             }
                         }
                         } // 消息列 + 输入区的外层
-
-                        // 「清空聊天记录」二次确认。Modal 是 overlay——
-                        // on_after_apply 把向上报的 Walk 钉成 empty，
-                        // 不占布局坑位，放 body 里当兄弟节点即可。
-                        // can_dismiss 默认 true：点遮罩或 Esc 即取消，Modal 自己关。
-                        clear_confirm := Modal {
-                            content +: {
-                                // 固定宽卡片 + Fill 子项：与 makepad 自带的
-                                // Dialog（dialog.rs）和 modal_footprint 示例
-                                // 同一个模式。宽度照 Dialog 的 420 收一档。
-                                // RoundedView 而不是 View：裸 View 的 draw_bg 没有
-                                // color/border_radius，卡片会整个透明（同根因，见上）。
-                                card := RoundedView {
-                                    width: 360
-                                    height: Fit
-                                    flow: Down
-                                    spacing: 10.
-                                    padding: Inset{left: 20 top: 16 right: 20 bottom: 16}
-                                    show_bg: true
-                                    draw_bg.color: #(palette().card)
-                                    draw_bg.border_radius: uniform(16.)
-
-                                    title := Label {
-                                        width: Fill
-                                        height: Fit
-                                        text: "确认清空聊天记录？"
-                                        draw_text +: {
-                                            color: #(palette().fg)
-                                            text_style: theme.font_bold{font_size: 15}
-                                        }
-                                    }
-
-                                    desc := Label {
-                                        width: Fill
-                                        height: Fit
-                                        text: "此操作将永久删除所有聊天记录，此操作不可撤销。"
-                                        draw_text +: {
-                                            color: #(palette().muted_fg)
-                                            text_style: theme.font_regular{font_size: 12}
-                                        }
-                                    }
-
-                                    row := View {
-                                        width: Fill
-                                        height: Fit
-                                        flow: Right
-                                        spacing: 8.
-                                        align: Align{x: 1.0}
-
-                                        cancel_clear_button := glass.GlassButton {
-                                            text: "取消"
-                                            width: 72
-                                            height: 36
-                                            // 默认白字在浅色玻璃上不可读；跟随当前模式正文色
-                                            draw_text +: { color: #(palette().fg) }
-                                        }
-
-                                        confirm_clear_button := glass.GlassButtonProminent {
-                                            text: "确认清空"
-                                            width: 96
-                                            height: 36
-                                            // 警示红：GlassButton 没有 destructive 变体，靠 tint 自己调
-                                            draw_glass +: { tint: vec4(0.85, 0.24, 0.20, 0.40) }
-                                            // 深色模式白字 / 浅色模式深字（红 tint 叠在白玻璃上）
-                                            draw_text +: { color: #(palette().fg) }
-                                        }
-                                    }
-                                }
-                            }
-                        }
 
                         // ── 设置抽屉（规格 §5；本轮只做「切换模型」）
                         // 用 Modal 做外壳：它是 overlay（on_after_apply 把 Walk 钉成 empty），
@@ -3452,6 +3378,185 @@ script_mod! {
                                                     }
                                                 }
                                             }
+                                        }
+
+                                        // 段间分隔线（§5）
+                                        RectView {
+                                            width: Fill
+                                            height: 1
+                                            show_bg: true
+                                            draw_bg.color: #(palette().border)
+                                        }
+
+                                        // ── 第 4 段：清空聊天记录（§5-4）
+                                        // 危险操作从输入区移到这里：输入胶囊内部只剩
+                                        // [🖼] [input] [↑]（规格 §4），清空属于设置。
+                                        View {
+                                            width: Fill
+                                            height: Fit
+                                            flow: Down
+                                            spacing: 8.
+
+                                            // 分区标题：16px 红色垃圾桶 + 14px 文字
+                                            View {
+                                                width: Fill
+                                                height: Fit
+                                                flow: Right
+                                                spacing: 8.
+                                                align: Align{y: 0.5}
+
+                                                Label {
+                                                    width: Fit
+                                                    height: Fit
+                                                    padding: 0
+                                                    text: "🗑"
+                                                    draw_text +: {
+                                                        color: #xEF4444
+                                                        text_style: theme.font_regular{font_size: 16}
+                                                    }
+                                                }
+
+                                                Label {
+                                                    width: Fit
+                                                    height: Fit
+                                                    padding: 0
+                                                    text: "清空聊天记录"
+                                                    draw_text +: {
+                                                        color: #(palette().fg)
+                                                        text_style: theme.font_regular{font_size: 14}
+                                                    }
+                                                }
+                                            }
+
+                                            // 红底白字、32 高、圆角 10。二次确认复用
+                                            // 下面的 clear_confirm（与网页版一致）。
+                                            drawer_clear_button := glass.Button {
+                                                text: "清空记录"
+                                                width: Fill
+                                                height: 32
+                                                padding: 0
+                                                draw_text +: {
+                                                    color: #xffffffff
+                                                    color_hover: #xffffffff
+                                                    color_down: #xffffffff
+                                                    text_style: theme.font_regular{font_size: 13}
+                                                }
+                                                draw_bg +: {
+                                                    border_size: 0.0
+                                                    border_radius: uniform(10.0)
+                                                    color: #xEF4444
+                                                    color_hover: #xDC2626
+                                                    color_down: #xB91C1C
+                                                    border_color: #x00000000
+                                                    border_color_hover: #x00000000
+                                                    border_color_down: #x00000000
+                                                    top_glint: #x00000000
+                                                    inner_shadow: #x00000000
+                                                }
+                                            }
+
+                                            Label {
+                                                width: Fill
+                                                height: Fit
+                                                padding: 0
+                                                text: "此操作不可撤销，将删除所有聊天记录"
+                                                draw_text +: {
+                                                    color: #xB3B3B3
+                                                    text_style: theme.font_regular{font_size: 12}
+                                                }
+                                            }
+                                        }
+
+                                        // 段间分隔线（§5）
+                                        RectView {
+                                            width: Fill
+                                            height: 1
+                                            show_bg: true
+                                            draw_bg.color: #(palette().border)
+                                        }
+
+                                        // 页脚：18px「Ave atque vale」+ 16 上内距（§5）。
+                                        // 渐变文字用随时间移动的单色近似，见 footer_glow()。
+                                        Label {
+                                            width: Fill
+                                            height: Fit
+                                            padding: Inset{top: 16}
+                                            align: Align{x: 0.5}
+                                            text: "Ave atque vale"
+                                            draw_text +: {
+                                                color: #(footer_glow())
+                                                text_style: theme.font_regular{font_size: 18}
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // 「清空聊天记录」二次确认。放在抽屉之后声明：Modal 的
+                        // overlay 按绘制顺序叠放（modal.rs 的双 modal 测试里
+                        // 「后声明的在上面」），抽屉开着时它必须压在最上层。
+                        // can_dismiss 默认 true：点遮罩或 Esc 即取消，Modal 自己关。
+                        clear_confirm := Modal {
+                            content +: {
+                                // 固定宽卡片 + Fill 子项：与 makepad 自带的
+                                // Dialog（dialog.rs）和 modal_footprint 示例
+                                // 同一个模式。宽度照 Dialog 的 420 收一档。
+                                // RoundedView 而不是 View：裸 View 的 draw_bg 没有
+                                // color/border_radius，卡片会整个透明（同根因，见上）。
+                                card := RoundedView {
+                                    width: 360
+                                    height: Fit
+                                    flow: Down
+                                    spacing: 10.
+                                    padding: Inset{left: 20 top: 16 right: 20 bottom: 16}
+                                    show_bg: true
+                                    draw_bg.color: #(palette().card)
+                                    draw_bg.border_radius: uniform(16.)
+
+                                    title := Label {
+                                        width: Fill
+                                        height: Fit
+                                        text: "确认清空聊天记录？"
+                                        draw_text +: {
+                                            color: #(palette().fg)
+                                            text_style: theme.font_bold{font_size: 15}
+                                        }
+                                    }
+
+                                    desc := Label {
+                                        width: Fill
+                                        height: Fit
+                                        text: "此操作将永久删除所有聊天记录，此操作不可撤销。"
+                                        draw_text +: {
+                                            color: #(palette().muted_fg)
+                                            text_style: theme.font_regular{font_size: 12}
+                                        }
+                                    }
+
+                                    row := View {
+                                        width: Fill
+                                        height: Fit
+                                        flow: Right
+                                        spacing: 8.
+                                        align: Align{x: 1.0}
+
+                                        cancel_clear_button := glass.GlassButton {
+                                            text: "取消"
+                                            width: 72
+                                            height: 36
+                                            // 默认白字在浅色玻璃上不可读；跟随当前模式正文色
+                                            draw_text +: { color: #(palette().fg) }
+                                        }
+
+                                        confirm_clear_button := glass.GlassButtonProminent {
+                                            text: "确认清空"
+                                            width: 96
+                                            height: 36
+                                            // 警示红：GlassButton 没有 destructive 变体，靠 tint 自己调
+                                            draw_glass +: { tint: vec4(0.85, 0.24, 0.20, 0.40) }
+                                            // 深色模式白字 / 浅色模式深字（红 tint 叠在白玻璃上）
+                                            draw_text +: { color: #(palette().fg) }
                                         }
                                     }
                                 }
