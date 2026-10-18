@@ -1449,9 +1449,18 @@ impl App {
     fn sync_send_enabled(&self, cx: &mut Cx) {
         let has_text = !self.ui.text_input(cx, ids!(input)).text().trim().is_empty();
         let enabled = has_text || self.pending_image.is_some();
-        self.ui
-            .widget(cx, ids!(send_button))
-            .set_disabled(cx, !enabled);
+        let mut send_button = self.ui.widget(cx, ids!(send_button));
+        send_button.set_disabled(cx, !enabled);
+        // SVG 图标是单色 uniform，没有 `color_disabled` 槽位：跟着禁用态换色，
+        // 否则置灰的珊瑚键上会留一架纯白的纸飞机（网页版是 muted-foreground）。
+        let icon_color = if enabled {
+            rgba(0xFFFFFFFF)
+        } else {
+            palette().disabled_fg
+        };
+        script_apply_eval!(cx, send_button, {
+            draw_icon +: { color: #(icon_color) }
+        });
     }
 
     /// 抽屉里与当前模型有关的三处文字/徽章：触发器、列表选中行、底部「当前: X」。
@@ -1796,6 +1805,55 @@ const LATO_BOLD_TTF: &[u8] = include_bytes!("../resources/fonts/Lato-Bold.ttf");
 const POPPINS_SEMIBOLD_TTF: &[u8] = include_bytes!("../resources/fonts/Poppins-SemiBold.ttf");
 const FIRA_CODE_REGULAR_TTF: &[u8] = include_bytes!("../resources/fonts/FiraCode-Regular.ttf");
 
+/// lucide 0.562.0 的六个图标原文件。**嵌进二进制**：`crate_resource("self:...")`
+/// 在运行期是按编译期 manifest 路径拼绝对路径读磁盘的
+/// （`platform/src/script/res.rs:842-905`），exe 拷到别处就丢图标（见 §25.2）。
+/// `include_bytes!` 只要求编译期源码树里有这些文件，打包后的 exe 不再依赖它们。
+const ICON_SPARKLES_SVG: &[u8] = include_bytes!("../resources/icons/sparkles.svg");
+const ICON_SETTINGS_SVG: &[u8] = include_bytes!("../resources/icons/settings.svg");
+const ICON_GITHUB_SVG: &[u8] = include_bytes!("../resources/icons/github.svg");
+const ICON_IMAGE_SVG: &[u8] = include_bytes!("../resources/icons/image.svg");
+const ICON_SEND_SVG: &[u8] = include_bytes!("../resources/icons/send.svg");
+const ICON_BOT_SVG: &[u8] = include_bytes!("../resources/icons/bot.svg");
+
+/// 把六个 SVG 注册成内存资源，挂到 `mod.decem_icons`。
+///
+/// 与 `install_web_fonts` 同一套路：`res.binary_resource`（`res.rs:1186-1218`）
+/// 建一个 `binary://` 资源，数据直接是内存字节；`DrawSvg::load_svg`
+/// （`draw/src/shader/draw_svg.rs:466-501`）走 `cx.get_resource`，拿到的是已
+/// Loaded 的字节，不碰磁盘。
+///
+/// 必须在 `self::script_mod` 之前调用——DSL 里的 `svg: mod.decem_icons.sparkles`
+/// 要在求值时就能解析到这个全局。
+fn install_icons(vm: &mut ScriptVm) {
+    // 与字体同理：样式重载会重跑 script_mod，但 heap 不重置，资源只建一次。
+    static EMBEDDED: OnceLock<()> = OnceLock::new();
+    if EMBEDDED.get().is_none() {
+        for (name, bytes) in [
+            (id!(sparkles_svg), ICON_SPARKLES_SVG),
+            (id!(settings_svg), ICON_SETTINGS_SVG),
+            (id!(github_svg), ICON_GITHUB_SVG),
+            (id!(image_svg), ICON_IMAGE_SVG),
+            (id!(send_svg), ICON_SEND_SVG),
+            (id!(bot_svg), ICON_BOT_SVG),
+        ] {
+            let bytes: ScriptValue = vm.bx.heap.new_array_from_vec_u8(bytes.to_vec()).into();
+            vm.set_injected_global(name, bytes);
+        }
+        script_eval!(vm, {
+            mod.decem_icons = {
+                sparkles: mod.res.binary_resource(sparkles_svg)
+                settings: mod.res.binary_resource(settings_svg)
+                github: mod.res.binary_resource(github_svg)
+                image: mod.res.binary_resource(image_svg)
+                send: mod.res.binary_resource(send_svg)
+                bot: mod.res.binary_resource(bot_svg)
+            }
+        });
+        let _ = EMBEDDED.set(());
+    }
+}
+
 /// 把嵌进二进制的字体注册成 Makepad 资源，并把主题里几个 `TextStyle` 的
 /// `font_family` 换成「自定义拉丁字体 + 原来的 IBM Plex + LXGW + Noto Color Emoji」。
 ///
@@ -1882,6 +1940,8 @@ impl AppMain for App {
         // 网页版字体的接入点：必须在 `makepad_code_editor::script_mod` 之前，
         // CodeView 在那一刻就把 `theme.font_code` 抄进了自己的 TextStyle。
         install_web_fonts(vm);
+        // 图标同理：嵌进二进制的 SVG 必须先于 `self::script_mod` 注册成资源
+        install_icons(vm);
         // CodeView（带语法高亮的代码块）属于独立的 makepad-code-editor crate，
         // 必须先注册它的脚本部件，下面 script_mod! 里的 `use mod.widgets.CodeView` 才能解析
         makepad_code_editor::script_mod(vm);
@@ -2504,6 +2564,10 @@ script_mod! {
                                         height: 40
                                         flow: Overlay
                                         align: Align{x: 0.0, y: 0.0}
+                                        // 在线点按网页版 `-bottom-0.5 -right-0.5` 溢出头像
+                                        // 右/下各 2px，容器不能裁。
+                                        clip_x: false
+                                        clip_y: false
 
                                         RoundedView {
                                             width: 40
@@ -2525,16 +2589,27 @@ script_mod! {
                                             }
                                         }
 
-                                        // 12×12 在线绿 + 2px 背景色描边（规格 §2）
-                                        RoundedView {
-                                            width: 12
-                                            height: 12
-                                            margin: Inset{left: 28 top: 28}
-                                            show_bg: true
-                                            draw_bg.color: #x22C55E
-                                            draw_bg.border_size: 2.0
-                                            draw_bg.border_color: #(palette().bg)
-                                            draw_bg.border_radius: uniform(6.0)
+                                        // 12×12 在线绿 + 2px 背景色描边（规格 §2）。
+                                        // 踩过两次：Overlay 里的 `margin` 不保证偏移；`abs_pos` 是
+                                        // **窗口绝对坐标**（会把点甩到窗口左上角）。所以用一个
+                                        // 与头像同尺寸的定位层，靠 `padding` 把点推到右下。
+                                        View {
+                                            width: 40
+                                            height: 40
+                                            flow: Down
+                                            padding: Inset{left: 30 top: 30}
+                                            clip_x: false
+                                            clip_y: false
+
+                                            RoundedView {
+                                                width: 12
+                                                height: 12
+                                                show_bg: true
+                                                draw_bg.color: #x22C55E
+                                                draw_bg.border_size: 2.0
+                                                draw_bg.border_color: #(palette().bg)
+                                                draw_bg.border_radius: uniform(6.0)
+                                            }
                                         }
                                     }
 
@@ -2565,17 +2640,16 @@ script_mod! {
                                                 }
                                             }
 
-                                            // Sparkles：U+F72B = FontAwesome 的 fa-wand-sparkles。
-                                            // 用 `theme.font_icons`（单色）而不是 ✨：彩色 emoji 的
-                                            // 黄色由字体自带，`color` 只影响轮廓。
-                                            Label {
+                                            // lucide `sparkles`（网页版 ChatInterface.tsx:119 的
+                                            // `<Sparkles className="w-4 h-4">`）：16px、#FCE38A。
+                                            // SVG 取自 lucide 0.562.0，与网页端依赖同版本。
+                                            Icon {
                                                 width: Fit
                                                 height: Fit
-                                                padding: 0
-                                                text: "\u{f72b}"
-                                                draw_text +: {
+                                                size: 16
+                                                draw_icon +: {
+                                                    svg: mod.decem_icons.sparkles
                                                     color: #xFCE38A
-                                                    text_style: theme.font_icons{font_size: 16}
                                                 }
                                             }
                                         }
@@ -2603,17 +2677,19 @@ script_mod! {
                                     spacing: 8.
                                     align: Align{y: 0.5}
 
-                                    // 20px 图标位：无 SVG 图标集，用文字代替。
-                                    // 两个按钮目前只是占位，不接动作。
+                                    // 两个按钮的图标：lucide 0.562.0 的 `github` / `settings`
+                                    // 原图（网页版 ChatInterface.tsx:135/144，20px）。
+                                    // ButtonFlat 自带 `draw_icon` 槽位，图标与文字共用命中区，
+                                    // 不需要额外叠一层（叠层会抢走点击）。
                                     github_button := glass.Button {
-                                        text: "GH"
+                                        text: ""
                                         width: 40
                                         height: 40
                                         padding: 0
-                                        draw_text +: {
-                                            color: #(palette().muted_fg)
-                                            color_hover: #(palette().fg)
-                                            text_style: theme.font_bold{font_size: 12}
+                                        icon_walk: Walk{width: 20.}
+                                        draw_icon +: {
+                                            svg: mod.decem_icons.github
+                                            color: #(palette().fg)
                                         }
                                         draw_bg +: {
                                             border_size: 0.0
@@ -2630,18 +2706,15 @@ script_mod! {
                                     }
 
                                     settings_button := glass.Button {
-                                        // U+F013 = FontAwesome 的实心齿轮（fa-gear）。
-                                        // 不用 ⚙ emoji：彩色 emoji 字形自带颜色，`color` 染不上。
-                                        // `theme.font_icons` 是主题里那套 fa-solid-900.ttf
-                                        // （theme_desktop_dark.rs:677-683），单色、跟随 color/color_hover。
-                                        text: "\u{f013}"
+                                        // lucide 的描边齿轮（不是 FontAwesome 的实心 fa-gear）。
+                                        text: ""
                                         width: 40
                                         height: 40
                                         padding: 0
-                                        draw_text +: {
-                                            color: #(palette().muted_fg)
-                                            color_hover: #(palette().fg)
-                                            text_style: theme.font_icons{font_size: 18}
+                                        icon_walk: Walk{width: 20.}
+                                        draw_icon +: {
+                                            svg: mod.decem_icons.settings
+                                            color: #(palette().fg)
                                         }
                                         draw_bg +: {
                                             border_size: 0.0
@@ -2767,18 +2840,17 @@ script_mod! {
                                             // 图片按钮在胶囊内部、输入框左侧（规格 §4）。
                                             // 按钮不是 Image，进输入行不会经 NaN 弄坏
                                             // TextInput 的命中区（迁移文档 §12 只针对 Image）。
-                                            // U+F03E = FontAwesome 的 fa-image，单色、
-                                            // 用 `theme.font_icons` 而不是彩色 emoji 🖼。
+                                            // 图标：lucide 0.562.0 的 `image` 原图（网页版
+                                            // ChatInput.tsx 的 `<Image className="w-5 h-5">`，20px）。
                                             attach_button := glass.Button {
-                                                text: "\u{f03e}"
+                                                text: ""
                                                 width: 40
                                                 height: 40
                                                 padding: 0
-                                                draw_text +: {
-                                                    color: #(palette().muted_fg)
-                                                    color_hover: #xF38181
-                                                    color_down: #xF38181
-                                                    text_style: theme.font_icons{font_size: 18}
+                                                icon_walk: Walk{width: 20.}
+                                                draw_icon +: {
+                                                    svg: mod.decem_icons.image
+                                                    color: #(palette().fg)
                                                 }
                                                 draw_bg +: {
                                                     border_size: 0.0
@@ -2827,21 +2899,22 @@ script_mod! {
                                             }
 
                                             // 40×40、圆角 16 的珊瑚发送键。
-                                            // Makepad 没有图标集，箭头用文字（规格允许）。
+                                            // 图标：lucide 0.562.0 的 `send` 原图（网页版
+                                            // ChatInput.tsx 的 `<Send className="w-4 h-4">`，16px）。
                                             // 必须是 ButtonFlat 而不是 glass.Button：后者的
                                             // 裁剪版 draw_bg（glass_panel.rs:841-878）不混合
                                             // color_disabled，禁用态只有文字会变灰。
+                                            // 图标是单色 uniform，没有 color_disabled，由
+                                            // `sync_send_enabled` 直接改 `draw_icon.color`。
                                             send_button := ButtonFlat {
-                                                text: "↑"
+                                                text: ""
                                                 width: 40
                                                 height: 40
                                                 padding: 0
-                                                draw_text +: {
+                                                icon_walk: Walk{width: 16.}
+                                                draw_icon +: {
+                                                    svg: mod.decem_icons.send
                                                     color: #xffffffff
-                                                    color_hover: #xffffffff
-                                                    color_down: #xffffffff
-                                                    color_disabled: #(palette().disabled_fg)
-                                                    text_style: theme.font_bold{font_size: 18}
                                                 }
                                                 draw_bg +: {
                                                     border_size: 0.0
@@ -3000,16 +3073,15 @@ script_mod! {
                                                 spacing: 8.
                                                 align: Align{y: 0.5}
 
-                                                // U+F074 = FontAwesome 的 fa-shuffle（原 ⇄ 是普通文字箭头，
-                                                // 缺字时同样会变豆腐块，统一换成主题图标字体）
-                                                Label {
+                                                // 图标：lucide 0.562.0 的 `bot` 原图（网页版切换模型
+                                                // 用的是 lucide `Bot`，不是 FontAwesome 的 shuffle）。
+                                                Icon {
                                                     width: Fit
                                                     height: Fit
-                                                    padding: 0
-                                                    text: "\u{f074}"
-                                                    draw_text +: {
+                                                    size: 16
+                                                    draw_icon +: {
+                                                        svg: mod.decem_icons.bot
                                                         color: #xF38181
-                                                        text_style: theme.font_icons{font_size: 16}
                                                     }
                                                 }
 

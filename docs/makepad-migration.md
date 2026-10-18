@@ -842,6 +842,9 @@ Makepad 自带的 `Icon` 部件要 `crate_resource("self:resources/xxx.svg")`：
 要么往 `resources/` 加文件（双击 exe 的 cwd 不稳定，资源目录会变成运行期依赖），
 要么自己注册 iconset。两条都超出「轻量」范围，**没有走 SVG**。
 
+> **已被 §25 取代**（2026-10-18）：SVG 路线后来走通了，顶栏设置与 GitHub
+> 现在都是 lucide 的描边 SVG 原图。§21.2 只记录当时的取舍。
+
 改用主题里已有的 FontAwesome Solid（`theme.font_icons`，
 `widgets/core/src/theme_desktop_dark.rs:677-683`）：单色字形、跟随 `color` / `color_hover`。
 
@@ -1013,6 +1016,10 @@ Google Fonts 的 `css2` 接口现在对任何 UA 都发 woff/woff2，所以取�
 `text_style: theme.font_icons{...}`，`color` / `color_hover` 直接染单色字形，
 尺寸与布局不变。
 
+> **本节图标里的 3 个已被 §25 换成 lucide SVG**（wand-sparkles → `sparkles.svg`、
+> shuffle → `bot.svg`、image → `image.svg`）。user / sun / moon / trash-can
+> 仍是 FontAwesome 字形。
+
 ### 24.1 字形存在性（先查再写）
 
 用 `fontTools` 读主题实际加载的那份字体
@@ -1068,3 +1075,163 @@ Google Fonts 的 `css2` 接口现在对任何 UA 都发 woff/woff2，所以取�
 | image | `#4B4B4B` | 0° ×615 |
 
 - 交互回归：齿轮开抽屉、深浅色来回切、点图片按钮弹窗，均正常；主题切回深色后退出。
+
+## 25. 图标换成 lucide SVG 原图（2026-10-18）
+
+只改 `decem-makepad/src/main.rs`，新增 `decem-makepad/resources/icons/*.svg`。
+**之前所有「Makepad 没有图标集，只能用 FontAwesome 字形」的结论（§21.2、§24）
+只适用于那一轮**：`Icon` 部件的 `draw_icon.svg` 与 `ButtonFlat` 的
+`draw_icon` 槽位都能直接吃 SVG，形状可以与网页版逐像素一致。
+
+### 25.1 六个图标
+
+SVG 取自 lucide **0.562.0**（与网页版 `package.json` 的 `lucide-react@^0.562.0`
+同版本），URL 形如
+`https://raw.githubusercontent.com/lucide-icons/lucide/0.562.0/icons/send.svg`，
+原文件写进 `resources/icons/`，未改路径数据。许可 ISC。
+
+| 位置 | 原来 | 现在（lucide 原图） |
+| --- | --- | --- |
+| 标题旁星芒 | `\u{f72b}` fa-wand-sparkles 16px | `sparkles.svg`，16px，`#FCE38A` |
+| 顶栏 GitHub | 文字 `GH` | `github.svg`（octocat 描边），20px，`palette().fg` |
+| 顶栏设置 | `\u{f013}` 实心 fa-gear 18px | `settings.svg`（描边齿轮），20px，`palette().fg` |
+| 输入胶囊图片键 | `\u{f03e}` fa-image 18px | `image.svg`，20px，`palette().fg` |
+| 发送键 | 文字 `↑` 18px | `send.svg`（纸飞机），16px，白色 |
+| 抽屉切换模型 | `\u{f074}` fa-shuffle 16px | `bot.svg`（小机器人），16px，`#F38181` |
+
+写法（图标在按钮里时用按钮自带的 `draw_icon` 槽位，不要另叠一层 `Icon`：
+后画的部件会抢走命中区，按钮就点不到了）：
+
+```text
+github_button := glass.Button {
+    text: ""
+    icon_walk: Walk{width: 20.}
+    draw_icon +: { svg: crate_resource("self://resources/icons/github.svg") color: #(palette().fg) }
+    ...
+}
+```
+
+纯展示处用部件 `Icon { size: 16, draw_icon +: { svg: ..., color: ... } }`。
+
+### 25.2 图标已嵌进二进制（2026-10-18 第二轮）
+
+**问题**：`self:` 的解析见 `platform/src/script/res.rs:842-905`，它把
+`script_mod.cargo_manifest_path`（**编译期的绝对路径**）与相对路径拼起来，
+运行期按这个绝对路径读磁盘。第一轮用 `crate_resource("self://resources/icons/*.svg")`
+时实测：把 `decem-makepad/resources/icons` 改名后重跑 release exe，六个图标
+**全部消失**（日志里没有报错，只是空着）——exe 换机器/换目录就丢图标。
+
+**现在**：六个 SVG 用 `include_bytes!` 嵌进二进制，走与字体相同的注入路线
+（`install_icons`，`main.rs`）：
+
+```rust
+const ICON_SPARKLES_SVG: &[u8] = include_bytes!("../resources/icons/sparkles.svg");
+// …
+
+fn install_icons(vm: &mut ScriptVm) {
+    static EMBEDDED: OnceLock<()> = OnceLock::new();
+    if EMBEDDED.get().is_none() {
+        for (name, bytes) in [(id!(sparkles_svg), ICON_SPARKLES_SVG), …] {
+            let bytes: ScriptValue = vm.bx.heap.new_array_from_vec_u8(bytes.to_vec()).into();
+            vm.set_injected_global(name, bytes);
+        }
+        script_eval!(vm, {
+            mod.decem_icons = { sparkles: mod.res.binary_resource(sparkles_svg) … }
+        });
+        let _ = EMBEDDED.set(());
+    }
+}
+```
+
+DSL 里改成 `svg: mod.decem_icons.sparkles`（不再是 `crate_resource`）。
+
+关键点：
+
+- **调用时机**：`install_icons(vm)` 在 `AppMain::script_mod` 里紧跟
+  `install_web_fonts(vm)`、在 `self::script_mod(vm)` 之前——DSL 求值时
+  `mod.decem_icons` 必须已存在。
+- **只建一次**：样式重载会重跑 `script_mod` 但 heap 不重置，用
+  `OnceLock` 挡住重复的 `binary_resource`，否则每切一次深浅色多留一份字节。
+- `res.binary_resource`（`res.rs:1186-1218`）直接建
+  `CxScriptResourceData::Loaded`；`DrawSvg::load_svg`
+  （`draw/src/shader/draw_svg.rs:466-501`）先 `cx.get_resource`，命中就不碰磁盘。
+- **`include_bytes!` 仍要求编译期源码树里有这六个文件**（Rust 的语义如此）。
+  也就是说：编译要源码树，**运行不要**。
+
+验证（真实输出）：
+
+```text
+# 1) 正常构建
+cargo makepad desktop build -p decem-makepad --release   → Finished release in 4.12s
+grep -ac "M11.017 2.814a1 1 0 1 1.966" target/release/decem-makepad.exe → 1   # SVG 路径数据已在 exe 里
+
+# 2) 移走 resources/icons，运行「已构建的」exe
+mv resources/icons /tmp/icons-emb-bak
+./target/release/decem-makepad.exe                        → 日志 [E] = 0
+截图（深色 1470×1140）：sparkles / github / settings / image / send 全在；
+打开设置抽屉：bot 也在。六个图标一个不少。
+
+# 3) 目录缺失时重新构建（预期失败，说明依赖只在编译期）
+cargo makepad desktop build -p decem-makepad --release
+error: couldn't read `src\../resources/icons/bot.svg`: 系统找不到指定的路径。 (os error 3)
+error: could not compile `decem-makepad` (bin "decem-makepad") due to 6 previous errors
+
+# 4) 目录改回，重新构建
+mv /tmp/icons-emb-bak resources/icons
+cargo makepad desktop build -p decem-makepad --release   → Finished release in 4.12s
+```
+
+发布相关：
+
+- Windows：把 exe 单独拷走也能画出六个图标（不再需要 `resources/`）。
+- macOS `.app`：`desktop_bundle.rs:268-314` 仍会拷 `resources/`，但现在不是必需。
+- Android：`include_bytes!` 是纯 Rust 的编译期嵌入，与平台无关；APK 里
+  `cargo_makepad` 照样把 `resources/` 打进 assets（`android/compile.rs:1780-1830`），
+  两条路都成立，图标不会因为这次改动失效。
+
+### 25.3 发送键禁用态的图标着色
+
+`draw_icon` 是单色 uniform，没有 `color_disabled` 这种状态槽位，
+所以 `sync_send_enabled` 里跟着禁用态直接改色：
+
+```rust
+let mut send_button = self.ui.widget(cx, ids!(send_button));
+send_button.set_disabled(cx, !enabled);
+let icon_color = if enabled { rgba(0xFFFFFFFF) } else { palette().disabled_fg };
+script_apply_eval!(cx, send_button, { draw_icon +: { color: #(icon_color) } });
+```
+
+两个坑：
+
+1. 必须写 `draw_icon +:`（合并），写 `draw_icon:` 会报
+   `type mismatch for property draw_icon: expected DrawSvg, got object`，
+   因为那是拿一个对象整体替换 DrawSvg。
+2. `script_apply_eval!` 的第一个参数要 `mut` 绑定，否则
+   `cannot borrow value as mutable`。
+
+### 25.4 在线点
+
+网页版 `absolute -bottom-0.5 -right-0.5 w-3 h-3` → 12px、右/下各溢出头像 2px、
+2px `border-background`。原来 `margin: Inset{left: 28 top: 28}` 是贴死右下角、
+不溢出。改成 `left/top: 30`（40 + 2 − 12），并给 40×40 的 Overlay 容器
+`clip_x/clip_y: false`，否则溢出部分被裁。颜色 `#x22C55E`、描边
+`palette().bg`（深色 `#000000` / 浅色 `#F2F2F2`）、圆角 6 本来就对。
+
+### 25.5 输入框文字
+
+核对后**无需改动**：`font_size: 14`、`padding: 8/10`、
+`color_empty: palette().muted_fg`（深色 `#B3B3B3`、浅色 `#666666`），
+与网页版 `text-sm py-2.5 px-2 placeholder:text-muted-foreground` 一致。
+
+### 25.6 验证
+
+- `cargo check`、`cargo clippy --release --all-targets -- -D warnings`、
+  `cargo fmt`、`cargo makepad desktop build -p decem-makepad --release` 全绿。
+- 深色 / 浅色各跑 7 秒后 kill，日志 `grep -ac "\[E\]"` 与
+  `grep -aic "font miss"` 都是 `0`。
+- 截图（kimi-cu，1470×1140）：顶栏在线点在头像右下并溢出 2px、星芒是四角星
+  + 小点、GitHub 是 octocat 描边、设置是描边齿轮；输入胶囊里的图片键是描边
+  图片框、发送键是纸飞机（空输入时灰、输入 `hi` 后变白 + 珊瑚底）；
+  抽屉「切换模型」是小机器人。
+- 已知差异：attached 图片键 hover 时网页版会把图标染成 `#F38181`，
+  现在只有 hover 底色变、图标色不变（`draw_icon` 拿不到按钮的 hover 状态）。
