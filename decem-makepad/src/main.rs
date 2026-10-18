@@ -2041,9 +2041,19 @@ script_mod! {
                                 body: ""
                                 use_code_block_widget: true
                                 use_math_widget: true
-                                code_block := View {
+                                // 代码块外框：网页版 pre 是 rounded-lg（12px）+ p-3（12px）
+                                // （MessageBubble.tsx:105）。底色画在这一层，因为 CodeEditor 的
+                                // 底色是 DrawColor 直角色块（code_editor.rs:250），自己给不出圆角。
+                                code_block := RoundedView {
                                     width: Fill
                                     height: Fit
+                                    show_bg: true
+                                    draw_bg.color: #x1a1b26
+                                    draw_bg.border_radius: uniform(12.)
+                                    // 12 的内距照网页版；CodeView 的 `pad_left_top` 在
+                                    // CodeViewBase 里已经是 0（code_view.rs:11-12），不会叠加。
+                                    padding: Inset{left: 12 top: 12 right: 12 bottom: 12}
+
                                     // CodeView 的 walk 取自 editor 字段（code_view.rs:60-62），
                                     // 宽高与底色都要在 editor +: 里给，实例上写 width/height 会运行期报错。
                                     code_view := CodeView {
@@ -2054,9 +2064,8 @@ script_mod! {
                                             // 只读（code_editor.rs:293）；行号 gutter 关掉（code_editor.rs:295），与网页版一致
                                             read_only: true
                                             show_gutter: false
-                                            // 底色与网页版 pre 一致：rgba(0,0,0,0.3)（MessageBubble.tsx 的 bg-black/30），
-                                            // 铺在气泡底色 #x1a1a1a 上约等于近黑
-                                            draw_bg +: { color: #x0000004D }
+                                            // 全透明：底色交给上面的 RoundedView，圆角才露得出来
+                                            draw_bg +: { color: #x00000000 }
                                         }
                                     }
                                 }
@@ -2266,10 +2275,11 @@ script_mod! {
                         width: Fit
                         height: Fit
                         padding: 0
-                        text: "👁"
+                        // U+F06E = FontAwesome 的 fa-eye，单色、跟随徽章的薄荷色
+                        text: "\u{f06e}"
                         draw_text +: {
                             color: #x4DB6AC
-                            text_style: theme.font_regular{font_size: 11}
+                            text_style: theme.font_icons{font_size: 11}
                         }
                     }
 
@@ -2514,15 +2524,18 @@ script_mod! {
                                     }
 
                                     settings_button := glass.Button {
-                                        // U+FE0E 请求文字样式，避免彩色 emoji 齿轮盖掉灰色
-                                        text: "⚙︎"
+                                        // U+F013 = FontAwesome 的实心齿轮（fa-gear）。
+                                        // 不用 ⚙ emoji：彩色 emoji 字形自带颜色，`color` 染不上。
+                                        // `theme.font_icons` 是主题里那套 fa-solid-900.ttf
+                                        // （theme_desktop_dark.rs:677-683），单色、跟随 color/color_hover。
+                                        text: "\u{f013}"
                                         width: 40
                                         height: 40
                                         padding: 0
                                         draw_text +: {
                                             color: #(palette().muted_fg)
                                             color_hover: #(palette().fg)
-                                            text_style: theme.font_regular{font_size: 20}
+                                            text_style: theme.font_icons{font_size: 18}
                                         }
                                         draw_bg +: {
                                             border_size: 0.0
@@ -3134,10 +3147,11 @@ script_mod! {
                                                         width: Fit
                                                         height: Fit
                                                         padding: 0
-                                                        text: "👁"
+                                                        // U+F06E = FontAwesome 的 fa-eye（同上，单色）
+                                                        text: "\u{f06e}"
                                                         draw_text +: {
                                                             color: #x4DB6AC
-                                                            text_style: theme.font_regular{font_size: 11}
+                                                            text_style: theme.font_icons{font_size: 11}
                                                         }
                                                     }
 

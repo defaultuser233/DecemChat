@@ -797,3 +797,67 @@ draw_glass +: { layer_opacity: 0.0 surface_alpha: 0.0 shadow_alpha: 0.0 border_w
 - `DECEM_THEME=dark` / `light` 各启动 7 秒后结束，stderr 无 `[E]`。
 - 交互回归（深色）：点输入框 → 打字 → Enter 发送 → SSE 回复正常；
   点「↻ 重新生成」→ 最后一条回复被替换，证明 18px 高的文字链接仍能命中。
+
+## 21. 代码块圆角 + 顶栏图标去 emoji（2026-10-18）
+
+只改了 `decem-makepad/src/main.rs`。
+
+### 21.1 代码块圆角
+
+网页版 `pre` 是 `bg-black/30 rounded-lg p-3`（`src/components/MessageBubble.tsx:105`），
+视觉上落在 Tokyo Night 的 `#1a1b26` 上、圆角 12、内距 12。
+Makepad 的 `CodeView` 自己画不出圆角：它的底色是 `DrawColor` 直角色块
+（`code_editor/src/code_editor.rs:250`），没有 radius 参数。
+
+做法：把 `code_block` 从 `View` 换成 `RoundedView`，底色与半径画在外层，
+`CodeEditor.draw_bg` 置全透明（`#x00000000`），圆角就露出来了：
+
+```text
+code_block := RoundedView {
+    width: Fill height: Fit
+    show_bg: true
+    draw_bg.color: #x1a1b26
+    draw_bg.border_radius: uniform(12.)
+    padding: Inset{left: 12 top: 12 right: 12 bottom: 12}
+    code_view := CodeView { ... editor +: { draw_bg +: { color: #x00000000 } } }
+}
+```
+
+**内距不会叠加**：`CodeViewBase` 已经把 `pad_left_top` 设成 `vec2(0,0)`
+（`code_editor/src/code_view.rs:11-12`），所以 12 的内距只来自外层 `RoundedView`。
+`Markdown` 仍按 `ids!(code_view)` 找编辑器（`markdown.rs:456`），
+`widget()` 在子树里递归查，外面多包一层不影响。
+
+⚠️ 一个**不是 bug 的观感问题**：模型偶尔把语言标记和代码写在同一行
+（` ```rust fn answer() -> i32 { 42 } `）时，pulldown-cmark 会把整行当作 info string，
+代码内容为空 —— 界面表现为一个空代码块。是否复现取决于模型输出格式，
+与这层圆角包装无关（seed 同字符串可稳定复现空块）。
+
+### 21.2 顶栏齿轮 / 眼睛图标：改用 `theme.font_icons`
+
+Makepad 自带的 `Icon` 部件要 `crate_resource("self:resources/xxx.svg")`：
+要么往 `resources/` 加文件（双击 exe 的 cwd 不稳定，资源目录会变成运行期依赖），
+要么自己注册 iconset。两条都超出「轻量」范围，**没有走 SVG**。
+
+改用主题里已有的 FontAwesome Solid（`theme.font_icons`，
+`widgets/core/src/theme_desktop_dark.rs:677-683`）：单色字形、跟随 `color` / `color_hover`。
+
+| 位置 | 原来 | 现在 |
+| --- | --- | --- |
+| 顶栏设置按钮 | `⚙︎` emoji（蓝，染不上色） | `\u{f013}` fa-gear，18px，`palette().muted_fg`，hover 变 `palette().fg` |
+| 抽屉「当前」徽章 / 模型行徽章 | `👁` emoji | `\u{f06e}` fa-eye，11px，`#x4DB6AC` |
+
+顶栏 `✨` 留 emoji：FA 免费集里没有 sparkles 字形，最近的 `fa-star`(f005)
+会换成另一个图标的语义，不动。抽屉里剩下的 `🔀 👤 🌙` 同理，后续要换时照这张表加。
+
+### 21.3 验证
+
+- 四角像素（PowerShell `System.Drawing`，真实网络回复的代码块）：
+  深色气泡 `#1A1A1A` 内，代码块边界 `#1A1B26`；四角点
+  `(269,447)/(1055,448)/(270,837)/(1055,837)` 全部为 `#1A1A1A`，
+  同边向内 30px 处为 `#1A1B26` —— 圆角真的把底色切掉了。
+  浅色同样：角点 `#FFFFFF`，边内 `#1A1B26`。
+- 齿轮取色：顶栏齿轮墨色平均 `#AFAFAF`（`#B3B3B3` + 抗锯齿），不再是蓝色 emoji。
+- `cargo check` / `cargo clippy --release --all-targets -- -D warnings` / `cargo fmt --check` 全绿；
+  `DECEM_THEME=dark`、`light` 各启动 7 秒，日志无 `[E]`、无 `font miss`。
+- 交互回归：点输入框 → 中文输入 → Enter 发送 → SSE 逐字回复 → 代码块圆角/内距正确。
