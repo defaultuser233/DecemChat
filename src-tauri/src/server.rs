@@ -68,5 +68,27 @@ fn file_response(path: &str, bytes: &'static [u8]) -> Response {
     if let Ok(value) = HeaderValue::from_str(mime.as_ref()) {
         response.headers_mut().insert(header::CONTENT_TYPE, value);
     }
+    // HTML 才加 CSP：模型输出是不可信内容，页面本身也不该能外连任何东西。
+    // 页面由这个服务器自己提供，Tauri 的 CSP 配置覆盖不到它，所以必须在这里下发。
+    if mime.type_() == mime_guess::mime::TEXT && mime.subtype() == mime_guess::mime::HTML {
+        if let Ok(value) = HeaderValue::from_str(CONTENT_SECURITY_POLICY) {
+            response
+                .headers_mut()
+                .insert(header::CONTENT_SECURITY_POLICY, value);
+        }
+    }
     response
 }
+
+/// 与 `index.html` 里那份保持一致。`connect-src 'self'` 允许同源的 `/api/chat`。
+const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; \
+script-src 'self'; \
+style-src 'self' 'unsafe-inline'; \
+img-src 'self' data: blob:; \
+connect-src 'self'; \
+font-src 'self' data:; \
+object-src 'none'; \
+base-uri 'none'; \
+frame-src 'none'; \
+frame-ancestors 'none'; \
+form-action 'none'";

@@ -82,13 +82,15 @@ function formatMessages(messages: Message[], model: string): any[] {
 // 解析 DashScope 兼容模式返回的 SSE 流
 async function consumeSSE(
   body: ReadableStream<Uint8Array>,
-  callbacks: StreamCallbacks
+  callbacks: StreamCallbacks,
+  signal?: AbortSignal
 ): Promise<void> {
   const reader = body.getReader();
   const decoder = new TextDecoder('utf-8');
   let buffer = '';
   let fullContent = '';
   let finished = false;
+  let aborted = false;
 
   const handleLine = (line: string) => {
     const trimmed = line.trim();
@@ -114,6 +116,11 @@ async function consumeSSE(
   };
 
   while (!finished) {
+    // 用户取消 / 超时：立刻停止读流，不要把半截内容当成正常完成
+    if (signal?.aborted) {
+      aborted = true;
+      break;
+    }
     const { value, done } = await reader.read();
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
@@ -122,6 +129,11 @@ async function consumeSSE(
     for (const line of lines) {
       handleLine(line);
     }
+  }
+  if (aborted) {
+    // 主动取消时已读到的内容保留（由调用方决定怎么收尾），这里不报错
+    callbacks.onComplete(fullContent);
+    return;
   }
   // 处理剩余的 buffer
   buffer += decoder.decode();
@@ -140,7 +152,8 @@ async function consumeSSE(
 export async function sendMessageStream(
   messages: Message[],
   model: string,
-  callbacks: StreamCallbacks
+  callbacks: StreamCallbacks,
+  signal?: AbortSignal
 ): Promise<void> {
   const formattedMessages = formatMessages(messages, model);
 
@@ -159,7 +172,9 @@ export async function sendMessageStream(
       headers: {
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
+      // AbortController 的 signal 必须真的交给 fetch，否则取消只是死代码
+      signal
     });
 
     if (!response.ok) {
@@ -177,7 +192,7 @@ export async function sendMessageStream(
     // 优先按 SSE 流解析，回退到 JSON
     const contentType = response.headers.get('content-type') || '';
     if (contentType.includes('text/event-stream') && response.body) {
-      await consumeSSE(response.body, callbacks);
+      await consumeSSE(response.body, callbacks, signal);
     } else {
       const data = await response.json().catch(() => null);
       const content =
@@ -191,9 +206,28 @@ export async function sendMessageStream(
       callbacks.onComplete(content);
     }
   } catch (error) {
+    // 用户主动取消：静默收场，不要弹「API 请求失败」
+    if (isAbortError(error) && !isTimeoutError(error)) {
+      return;
+    }
+    // 超时是我们自己 abort 的，要给出明确提示
+    if (isTimeoutError(error)) {
+      callbacks.onError('请求超时（120 秒），请检查网络后重试');
+      return;
+    }
     const errorMessage = error instanceof Error ? error.message : '请求失败';
     callbacks.onError(`API 请求失败: ${errorMessage}`);
   }
+}
+
+/** fetch 因 abort 而失败时抛出的错误（用户取消 / 超时都走这里）。 */
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError';
+}
+
+/** 超时用的是 `controller.abort(new DOMException(..., 'TimeoutError'))`。 */
+function isTimeoutError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'TimeoutError';
 }
 
 // Non-streaming version for compatibility

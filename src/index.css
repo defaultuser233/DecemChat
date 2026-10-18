@@ -1,4 +1,3 @@
-@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Lato:wght@400;700&display=swap');
 @import 'highlight.js/styles/tokyo-night-dark.css';
 
 @tailwind base;
@@ -76,7 +75,10 @@
   
   body {
     @apply bg-background text-foreground antialiased;
-    font-family: 'Lato', sans-serif;
+    /* 不再远程拉 Google Fonts：国内网络下经常超时，而且字体请求本身也是外部依赖。
+       本机装了 Lato/Poppins 就用，否则按系统栈回落（中文用系统中文体）。 */
+    font-family: 'Lato', system-ui, -apple-system, 'Segoe UI', 'Noto Sans SC',
+      'PingFang SC', 'Microsoft YaHei', sans-serif;
     overflow: hidden;
     height: 100vh;
     width: 100vw;
@@ -89,7 +91,8 @@
   }
   
   h1, h2, h3, h4, h5, h6 {
-    font-family: 'Poppins', sans-serif;
+    font-family: 'Poppins', system-ui, -apple-system, 'Segoe UI', 'Noto Sans SC',
+      'PingFang SC', 'Microsoft YaHei', sans-serif;
   }
 }
 

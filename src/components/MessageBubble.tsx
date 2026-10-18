@@ -2,7 +2,6 @@
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
-import rehypeRaw from 'rehype-raw';
 import type { Message } from '@/types';
 import { Loader2, RotateCcw } from 'lucide-react';
 
@@ -96,7 +95,7 @@ export function MessageBubble({
                 <div className="prose prose-sm dark:prose-invert max-w-none markdown-body">
                   <Markdown
                     remarkPlugins={[remarkGfm]}
-                    rehypePlugins={[rehypeHighlight, rehypeRaw]}
+                    rehypePlugins={[rehypeHighlight]}
                     components={{
                       p: ({ children }) => (
                         <p className="m-0 mb-1 last:mb-0">{children}</p>

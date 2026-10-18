@@ -5,6 +5,9 @@ import { saveImage, loadImage, clearAllImages } from '@/services/imageDB';
 
 const CHAT_STORAGE_KEY = 'decem-chat-messages';
 const DEFAULT_HISTORY_LIMIT = 20;
+
+/** 单次请求最长等待时间。上游挂起时前端必须能自己收场。 */
+const REQUEST_TIMEOUT_MS = 120_000;
 const WELCOME_MESSAGE_ID = 'welcome';
 const WELCOME_MESSAGE_CONTENT = '🦊狐狐来啦～(≧▽≦)/～💗你终于来找我玩啦！嗷呜～';
 
@@ -95,6 +98,12 @@ export function useChat(model: string) {
         abortControllerRef.current.abort();
       }
       abortControllerRef.current = new AbortController();
+      // 上游挂起时必须能自己收场：120 秒后主动 abort（TimeoutError，会被当成错误提示）
+      const requestTimeout = setTimeout(() => {
+        abortControllerRef.current?.abort(
+          new DOMException('timeout', 'TimeoutError')
+        );
+      }, REQUEST_TIMEOUT_MS);
 
       const messageId = Date.now().toString();
       const userMessage: Message = {
@@ -152,7 +161,8 @@ export function useChat(model: string) {
             onError: (errorMsg) => {
               throw new Error(errorMsg);
             },
-          }
+          },
+          abortControllerRef.current?.signal
         );
 
         if (!fullResponse) {
@@ -206,6 +216,12 @@ export function useChat(model: string) {
           }
         }, typingSpeed);
       } catch (err) {
+        // 用户主动取消不算错误，不要弹提示
+        if (err instanceof Error && err.name === 'AbortError') {
+          setTypingMessageId(null);
+          setIsLoading(false);
+          return;
+        }
         const errorMessage =
           err instanceof Error ? err.message : '发送消息失败';
         setError(errorMessage);
@@ -213,6 +229,7 @@ export function useChat(model: string) {
         setIsLoading(false);
         console.error('Chat error:', err);
       } finally {
+        clearTimeout(requestTimeout);
         abortControllerRef.current = null;
       }
     },
@@ -244,6 +261,17 @@ export function useChat(model: string) {
 
     setIsLoading(true);
     setError(null);
+
+    // 重新生成也要能取消/超时（与 sendMessage 同一套）
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    abortControllerRef.current = new AbortController();
+    const requestTimeout = setTimeout(() => {
+      abortControllerRef.current?.abort(
+        new DOMException('timeout', 'TimeoutError')
+      );
+    }, REQUEST_TIMEOUT_MS);
 
     const assistantMessageId = Date.now().toString();
     setTypingMessageId(assistantMessageId);
@@ -277,7 +305,8 @@ export function useChat(model: string) {
           onError: (errorMsg) => {
             throw new Error(errorMsg);
           },
-        }
+        },
+        abortControllerRef.current?.signal
       );
 
       if (!fullResponse) {
@@ -331,11 +360,20 @@ export function useChat(model: string) {
         }
       }, typingSpeed);
     } catch (err) {
+      // 用户主动取消不算错误
+      if (err instanceof Error && err.name === 'AbortError') {
+        setTypingMessageId(null);
+        setIsLoading(false);
+        return;
+      }
       const errorMessage =
         err instanceof Error ? err.message : '重新生成失败';
       setError(errorMessage);
       setTypingMessageId(null);
       setIsLoading(false);
+    } finally {
+      clearTimeout(requestTimeout);
+      abortControllerRef.current = null;
     }
   }, [messages, model]);
 

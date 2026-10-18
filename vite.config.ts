@@ -1,12 +1,47 @@
 import path from "path"
 import react from "@vitejs/plugin-react"
-import { defineConfig } from "vite"
+import { defineConfig, type PluginOption } from "vite"
 import { inspectAttr } from 'kimi-plugin-inspect-react'
 
+/**
+ * 生产构建才注入的 CSP。
+ *
+ * 不放进 index.html 的静态标记里，是因为开发时 React Refresh 会插内联脚本，
+ * 严格 `script-src 'self'` 会把 HMR 直接拦死；而生产产物（Tauri 壳、VPS 上的 dist）
+ * 里没有内联脚本，可以收紧。
+ * Tauri 一侧另由 `src-tauri/src/server.rs` 在 HTML 响应头下发同一份策略。
+ */
+const CSP = [
+  "default-src 'self'",
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob:",
+  "connect-src 'self'",
+  "font-src 'self' data:",
+  "object-src 'none'",
+  "base-uri 'none'",
+  "frame-src 'none'",
+  "form-action 'none'",
+].join('; ')
+
+function cspMeta(): PluginOption {
+  return {
+    name: 'decem-csp-meta',
+    apply: 'build',
+    transformIndexHtml(html) {
+      return html.replace(
+        '</title>',
+        `</title>\n    <meta http-equiv="Content-Security-Policy" content="${CSP}" />`,
+      )
+    },
+  }
+}
+
 // https://vite.dev/config/
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   base: './',
-  plugins: [inspectAttr(), react()],
+  // inspectAttr 会把源码路径与行号注入 DOM（生产包里能反查出 Windows 路径），只在开发时开
+  plugins: [mode === 'development' ? inspectAttr() : null, react(), cspMeta()],
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
@@ -77,4 +112,4 @@ export default defineConfig({
       },
     },
   },
-});
+}));
