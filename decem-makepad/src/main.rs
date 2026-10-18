@@ -114,34 +114,36 @@ fn push_message(text: String) {
     });
 }
 
-/// 头像图片只在第一次用到时读盘一次。
-/// 路径先试进程 cwd 下的 `public/images`，再试仓库根目录的 `../public/images`。
-fn read_avatar(name: &str) -> Option<Arc<[u8]>> {
-    ["public/images/", "../public/images/"]
-        .iter()
-        .find_map(|prefix| std::fs::read(format!("{prefix}{name}")).ok())
-        .map(Arc::from)
+/// 默认头像**嵌进二进制**。
+///
+/// 之前按进程 cwd 找 `public/images/…`，结果双击 exe（cwd = `target\release\`）时
+/// 两张图都找不到，界面上只剩两个空环；Android 上更是不可能存在这种路径。
+/// 这两张默认图很小（合计约 180KB），Embed 进去后任何平台、任何启动方式都有图。
+const DEFAULT_CHAR_AVATAR: &[u8] = include_bytes!("../../public/images/char_01.jpg");
+const DEFAULT_USER_AVATAR: &[u8] = include_bytes!("../../public/images/user_01.jpg");
+
+fn default_char_avatar() -> Arc<[u8]> {
+    Arc::from(DEFAULT_CHAR_AVATAR)
 }
 
-fn default_user_avatar() -> Option<Arc<[u8]>> {
-    read_avatar("user_01.jpg")
+fn default_user_avatar() -> Arc<[u8]> {
+    Arc::from(DEFAULT_USER_AVATAR)
 }
-
-static CHAR_AVATAR: OnceLock<Option<Arc<[u8]>>> = OnceLock::new();
 
 /// 用户头像。用户可以自己换，所以不能塞进 `OnceLock`：上传后要能整体替换。
 struct UserAvatar {
-    /// `None` 表示连默认图都没读到 —— 调用方只画头像环，不报错也不重试。
+    /// 永远有值：默认图已经嵌进二进制，用户上传的图替换它。
     bytes: Option<Arc<[u8]>>,
     /// 是否来自用户上传（持久化文件或本次会话选的）。顶栏据此决定画谁。
     custom: bool,
 }
 
-/// 启动时由 `load_initial_user_avatar` 决定（持久化文件优先于仓库默认图），
+/// 启动时由 `load_initial_user_avatar` 决定（持久化文件优先于内嵌默认图），
 /// 上传时整体替换。预览、顶栏、后续消息行都从这里取。
 static USER_AVATAR: RwLock<Option<UserAvatar>> = RwLock::new(None);
 
-/// 读不到的返回 `None`。
+static CHAR_AVATAR: OnceLock<Arc<[u8]>> = OnceLock::new();
+
 fn avatar_bytes(role: Role) -> Option<Arc<[u8]>> {
     match role {
         Role::User => {
@@ -149,13 +151,10 @@ fn avatar_bytes(role: Role) -> Option<Arc<[u8]>> {
             match state.as_ref() {
                 Some(state) => state.bytes.clone(),
                 // 正常路径下 `after_new_from_script` 已经初始化；这里只是兜底
-                // （没有机会展示读盘警告了，但仍按默认图显示）
-                None => default_user_avatar(),
+                None => Some(default_user_avatar()),
             }
         }
-        Role::Char => CHAR_AVATAR
-            .get_or_init(|| read_avatar("char_01.jpg"))
-            .clone(),
+        Role::Char => Some(CHAR_AVATAR.get_or_init(default_char_avatar).clone()),
     }
 }
 
@@ -218,11 +217,11 @@ fn save_avatar(bytes: &[u8], source: &Path) -> Result<PathBuf, String> {
     Ok(target)
 }
 
-/// 启动时决定用户头像：已保存的文件优先，否则退回 `public/images/user_01.jpg`。
+/// 启动时决定用户头像：已保存的文件优先，否则用**内嵌**的默认图。
 /// 读失败返回一句给用户看的原因（调用方追成一条 `⚠️` 消息），绝不静默吞掉。
 fn load_initial_user_avatar() -> (UserAvatar, Option<String>) {
     let fallback = || UserAvatar {
-        bytes: default_user_avatar(),
+        bytes: Some(default_user_avatar()),
         custom: false,
     };
     let Some(path) = stored_avatar_path() else {
