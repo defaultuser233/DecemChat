@@ -716,6 +716,75 @@ impl Worker {
     }
 }
 
+// ---------------------------------------------------------------- 背景光晕
+
+/// 光晕的呼吸时钟。`script_mod` 每次重载（切主题）都会重建部件树，
+/// 但动画相位不应该跟着归零，所以起点放在进程级静态里。
+static GLOW_EPOCH: OnceLock<std::time::Instant> = OnceLock::new();
+
+fn glow_seconds() -> f32 {
+    GLOW_EPOCH
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_secs_f32()
+}
+
+/// 根背景 + 三层径向光晕（规格 §1），一次全屏 quad 画完。
+///
+/// 网页版是 `radial-gradient(circle, rgba(…,0.4) 0%, transparent 70%)`
+/// 再叠 `filter: blur(40..60px)`。这里用解析式近似：径向衰减取
+/// `exp(-2.7·t²)`（t = 到圆心距离 / 半径），它是上述「0% 处 0.4 →
+/// 70% 处 0」的圆锥剖面再经高斯模糊后的拟合（逐点数值卷积得到，
+/// t=0.5/0.7/1.0 时的相对值 0.51/0.26/0.06）。真正的逐像素模糊需要
+/// 离屏 pass，为了三层极淡的光晕不值当。
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawBackdrop {
+    #[deref]
+    draw_super: DrawQuad,
+    /// 主题底色（深色 #000000 / 浅色 #F2F2F2）。
+    #[live]
+    bg: Vec4f,
+    /// 自启动起的秒数，驱动 `pulse-glow` 的 3s 循环。
+    #[live(0.0)]
+    glow_time: f32,
+}
+
+/// 整个 body 的容器：先在最底层画底色与光晕，再把 walk 交给内部 View。
+///
+/// 光晕画在子层之前，所以永远在消息/顶栏/输入区之下；这个部件也不转发
+/// 自己的事件（只转发内部 view 的），不会抢 TextInput 的命中区。
+#[derive(Script, ScriptHook, Widget)]
+pub struct Backdrop {
+    #[deref]
+    view: View,
+    #[redraw]
+    #[live]
+    draw_glow: DrawBackdrop,
+}
+
+impl Widget for Backdrop {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.view.handle_event(cx, event, scope);
+    }
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        // 只读当前 turtle 的内框，不消费 walk —— 下面还要把同一个 walk
+        // 交给内部 view 排版。根部件是 Fill/Fill，内框就是整个 body。
+        let rect = cx.turtle().inner_rect();
+        if rect.size.x > 0.0 && rect.size.y > 0.0 {
+            self.draw_glow.glow_time = glow_seconds();
+            self.draw_glow.draw_abs(cx, rect);
+        }
+        // 子层可能 step（里面有 PortalList），走完再交回 done（同 Bubble）
+        let mut step = self.view.draw_walk(cx, scope, walk);
+        while step.is_step() {
+            step = self.view.draw_walk(cx, scope, walk);
+        }
+        DrawStep::done()
+    }
+}
+
 // ---------------------------------------------------------------- 气泡定宽
 
 /// `ChatList` 画每一项之前把它放进来，`Bubble` 在自己 `draw_walk` 里取。
@@ -1095,6 +1164,10 @@ pub struct App {
     /// 抽屉里的文字首帧同步一次（部件树建好之前拿不到 Label）。
     #[rust]
     drawer_synced: bool,
+    /// 背景光晕的呼吸节拍（10 Hz）。网页版是 3s 的 CSS 动画；全速 60 Hz
+    /// 重绘对这层 3–6% 的光晕没必要，10 Hz 已经看不出跳变。
+    #[rust]
+    glow_timer: Option<Timer>,
 }
 
 /// 文件对话框的 id，用来认出哪个对话框回了话。
@@ -1752,6 +1825,17 @@ impl AppMain for App {
         self.load_header_avatar(cx);
         self.load_startup_image(cx);
         self.load_startup_avatar(cx);
+        // 光晕的 3s 呼吸：10 Hz 定时重绘。`Event::Startup` 有时在首帧前
+        // 到不了（部件树还没建），所以 Draw 也当作启动信号，只启动一次。
+        if self.glow_timer.is_none() && matches!(event, Event::Startup | Event::Draw(_)) {
+            self.glow_timer = Some(cx.start_interval(0.1));
+        }
+        if self
+            .glow_timer
+            .is_some_and(|timer| timer.is_event(event).is_some())
+        {
+            cx.redraw_all();
+        }
         self.match_event(cx, event);
         if let Event::Actions(actions) = event {
             self.handle_file_dialog(cx, actions);
@@ -1788,6 +1872,89 @@ script_mod! {
     // code_editor/src/code_editor.rs:26-48）。它不在 makepad-widgets 里，
     // AppMain::script_mod 已先调 makepad_code_editor::script_mod 注册。
     use mod.widgets.CodeView
+
+    // ── 背景 + 光晕（规格 §1）
+    // 三层光晕的尺寸、位置、透明度都照网页版 ChatInterface.tsx:75-99：
+    // 珊瑚 384 在左 1/4 上 1/4、薄荷 320 在右 1/4 下 1/4、黄 256 在右 1/3 中。
+    // 网页版 `animate-pulse-glow`（index.css:185-190）是 3s 的
+    // opacity 0.3↔0.6 + scale 1↔1.1；这里把相位映射到 0..1 后做同样的事。
+    // 三个 orb 的 alpha 峰值取「很淡」的 6% / 4.5% / 3%（orb opacity 与
+    // 动画 opacity 相乘、再经 blur 之后的量级，规格 §1 与 §8-4）。
+    let DrawBackdrop = set_type_default() do #(DrawBackdrop::script_shader(vm)) {
+        ..mod.draw.DrawQuad
+        bg: #x000000
+        glow_time: 0.0
+
+        // CSS ease-in-out 的三角波（0 → 1 → 0）
+        pulse_at: fn(phase: float) -> float {
+            let tri = 1.0 - abs(fract(phase) * 2.0 - 1.0)
+            return tri * tri * (3.0 - 2.0 * tri)
+        }
+
+        // 一个 orb 的 alpha：峰值 × 呼吸 × 径向衰减。
+        // t 用「到圆心距离 / 半径」归一化，scale 动画直接改半径。
+        orb_alpha: fn(p: vec2, center: vec2, radius: float, peak: float, pulse: float) -> float {
+            let t = length(p - center) / max(radius, 0.001)
+            return peak * mix(0.5, 1.0, pulse) * exp(-2.7 * t * t)
+        }
+
+        pixel: fn() {
+            let w = self.rect_size.x
+            let h = self.rect_size.y
+            let p = self.pos * self.rect_size
+            let phase = self.glow_time / 3.0
+            let coral = #xF38181
+            let mint = #x95E1D3
+            let yellow = #xFCE38A
+            let mut col = self.bg.rgb
+
+            // 珊瑚：左 1/4、上 1/4，直径 384
+            let p1 = self.pulse_at(phase)
+            let a1 = self.orb_alpha(
+                p,
+                vec2(w * 0.25 + 192.0, h * 0.25 + 192.0),
+                192.0 * (1.0 + 0.1 * p1),
+                0.06,
+                p1
+            )
+            col = mix(col, coral.rgb, a1)
+
+            // 薄荷：右 1/4、下 1/4，直径 320（网页版动画延迟 1.5s = 半周）
+            let p2 = self.pulse_at(phase + 0.5)
+            let a2 = self.orb_alpha(
+                p,
+                vec2(w * 0.75 - 160.0, h * 0.75 - 160.0),
+                160.0 * (1.0 + 0.1 * p2),
+                0.045,
+                p2
+            )
+            col = mix(col, mint.rgb, a2)
+
+            // 黄：右 1/3、垂直居中，直径 256（延迟 3s = 同相）
+            let p3 = self.pulse_at(phase)
+            let a3 = self.orb_alpha(
+                p,
+                vec2(w - w / 3.0 - 128.0, h * 0.5 + 128.0),
+                128.0 * (1.0 + 0.1 * p3),
+                0.03,
+                p3
+            )
+            col = mix(col, yellow.rgb, a3)
+
+            return vec4(col, 1.0)
+        }
+    }
+
+    let Backdrop = #(Backdrop::register_widget(vm)) {
+        width: Fill
+        height: Fill
+        flow: Down
+        spacing: 0.
+        padding: 0
+        draw_glow: DrawBackdrop {
+            bg: #(palette().bg)
+        }
+    }
 
     // 气泡定宽容器：自己量正文宽度，短消息贴文字、长消息到上限换行。
     // 见 docs/makepad-migration.md §6.2
@@ -1924,15 +2091,32 @@ script_mod! {
                     // 只在最后一条 char 消息上可见（流式时隐藏），
                     // 显隐由 ChatList::draw_walk 按项控制。
                     regen_button := glass.GlassButton {
-                        text: "重新生成"
+                        // 规格 §3：12px 珊瑚文字链接，无边框、无底色。
+                        // ↻ 代替网页版的 RotateCcw 图标（12px）；`GlassButton`
+                        // 是 `ChatList` 里 `glass_button(...)` 查找的类型，不能换。
+                        text: "↻ 重新生成"
                         width: Fit
-                        height: 30
-                        padding: Inset{left: 12 right: 12 top: 0 bottom: 0}
+                        height: 18
+                        padding: 0
+                        // 玻璃层整体关掉：`layer_opacity` 乘在所有输出上
+                        // （gauss_view.rs:808），底、边、阴影一并消失。
+                        // 只留下文字层。
+                        draw_glass +: {
+                            layer_opacity: 0.0
+                            surface_alpha: 0.0
+                            shadow_alpha: 0.0
+                            border_width: 0.0
+                        }
                         // GlassButton 的默认文字是白的（glass_panel.rs:252），
-                        // 浅色模式下白字压在白玻璃上会看不见；珊瑚在两种模式都清楚。
-                        draw_text +: { color: #xF38181 }
-                        // 淡珊瑚：与用户气泡的珊瑚（#F38181）同族，提示这是对最后一段问答的操作
-                        draw_glass +: { tint: vec4(0.95, 0.51, 0.51, 0.18) }
+                        // 浅色模式下白字压在白底上会看不见；珊瑚在两种模式都清楚。
+                        draw_text +: {
+                            color: #xF38181
+                            text_style: theme.font_regular{font_size: 12}
+                        }
+                        // 悬停只轻微收一点透明度（网页版是换 #e86a6a；
+                        // 这里拿不到 hover 颜色通道，退一步做可感知的反馈）
+                        hover_ink: 0.92
+                        down_ink: 0.72
                     }
                 }
             }
@@ -2163,18 +2347,15 @@ script_mod! {
                 // 保证窗口没有任何一条边缝漏出主题灰。
                 pass +: { clear_color: #(palette().bg) }
                 body +: {
-                    // 纯色底必须用 SolidView：裸 View 的 draw_bg 是 DrawQuad，
-                    // 着色器里根本没有 color（pixel 直接返回 #0000），
-                    // `show_bg: true` + `draw_bg.color` 会“接受属性、一个像素都不画”
-                    // （apps/storybook/src/shell.rs:110-114、draw/src/shader/draw_quad.rs:65-67）。
-                    SolidView{
+                    // 背景与光晕都在 Backdrop 自己的着色器里（见 main.rs 的
+                    // DrawBackdrop）：它先画底色 + 三层 orb，再把 walk 交给
+                    // 内部 View。因此光晕天然位于全部内容之下，不参与命中。
+                    Backdrop{
                         width: Fill
                         height: Fill
                         flow: Down
                         spacing: 0.
                         padding: 0
-                        show_bg: true
-                        draw_bg.color: #(palette().bg)
 
                         // ── 顶栏（规格 §2，高 65 = 64 内容 + 1 底边）
                         // 全宽；玻璃底只用半透明色模拟（Makepad 没有 backdrop blur）。

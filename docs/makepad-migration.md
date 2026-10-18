@@ -721,3 +721,79 @@ cargo makepad android --abi=aarch64 --sdk-path='D:/Android/Sdk' \
 ```
 
 产物：`target/android/makepad-android-apk/decem_makepad/apk/decemchat.apk`
+
+## 20. 视觉对齐第二轮：背景光晕 / 重新生成链接 / 发送键（2026-10-18）
+
+对应 `docs/makepad-visual-spec.md` §1、§3、§4。只改了 `decem-makepad/src/main.rs`。
+
+### 20.1 背景光晕：一次全屏 quad 里做解析式径向渐变
+
+网页版是三个绝对定位的 `div`，各自 `radial-gradient(circle, rgba(...,0.4) 0%, transparent 70%)`
+加 `filter: blur(40/50/60px)`（`src/components/ChatInterface.tsx:75-99`），
+再叠 `animate-pulse-glow`（3s，opacity 0.3↔0.6、scale 1↔1.1，`src/index.css:185-190`）。
+
+Makepad 侧的做法：
+
+- 新增 `Backdrop` 部件（`main.rs` 的「背景光晕」段）替换原来的根 `SolidView`。
+  它先用自己的 `DrawBackdrop` 着色器画「底色 + 三层 orb」，再把 walk 交给内部
+  `#[deref] view`。所以光晕**在任何子内容之前绘制**，天然位于消息/顶栏/输入区之下；
+  它也不对自身 draw 区域调用 `event.hits`，不会抢命中。
+- 渐变不是贴图、也不是离屏 blur：`pixel` 里直接算
+  `alpha = peak × mix(0.5,1.0,pulse) × exp(-2.7·t²)`，`t = 距离 / 半径`。
+  `exp(-2.7t²)` 是对「圆锥剖面（0% 处 0.4 → 70% 处 0）+ 高斯模糊」
+  做数值卷积后的拟合：t=0.5/0.7/1.0 时相对值 ≈0.51/0.26/0.06。
+  因此没有真正的 60px 模糊半径，但边缘同样是平滑的高斯状衰减。
+- 位置/尺寸：珊瑚 384、左 1/4 上 1/4；薄荷 320、右 1/4 下 1/4；黄 256、右 1/3 垂直居中。
+  全部按 `rect_size` 实时算，窗口缩放时比例不变。
+- 呼吸：相位在 Rust 侧 `glow_seconds()`（进程级 `OnceLock<Instant>`，切主题不重置），
+  着色器把相位换成 ease-in-out 三角波。`App` 用 `cx.start_interval(0.1)` 以 10 Hz
+  触发 `redraw_all`。没有用 60 Hz：对这层 3–6% 的光晕没必要，也不让 GPU 常亮。
+- 峰值 alpha：珊瑚 6%、薄荷 4.5%、黄 3%。这是**最终叠到背景上的 alpha**
+  （网页版的 orb opacity 与动画 opacity 相乘、再被 blur 摊薄后的量级，规格 §1/§8-4）。
+
+实测（PowerShell `System.Drawing` 采样，窗口 1470×1140 截图）：
+
+| 主题 | 珊瑚中心 | 薄荷中心 | 黄中心 | 纯背景 |
+| --- | --- | --- | --- | --- |
+| 深色（峰值） | `#0F0909` | `#090B0B` | `#0C0A07` | `#000000` |
+| 深色（低相位） | `#090606` | `#090908` | `#070705` | `#000000` |
+| 浅色（峰值） | `#F2EBEB` | `#EFF0EF` | `#F1F1EE` | `#F2F2F2` |
+| 浅色（低相位） | `#F1EEEE` | `#EFF0EF` | `#F1F1EE` | `#F2F2F2` |
+
+深色与浅色各做过一次同点跨 3s 的 32 次采样（100ms 间隔）。深色珊瑚 G 通道
+6↔9、浅色 235↔238 往复，说明 3s 呼吸在跑。深色中心峰值 `#0F0909`
+（相对纯黑 15/255≈5.9% 的像素值），按珊瑚通道反推 alpha≈15/243≈6.2%，
+低相位 `#090606` 约 3.5%；正文/气泡对比度不受影响。
+
+### 20.2 「重新生成」改成文字链接
+
+规格 §3 要求 12px 珊瑚文字、12px 图标 + 4px 间距、无边框无底色。
+`ChatList` 用 `glass_button(...)` 按类型查找按钮（`main.rs::draw_walk` / `handle_actions`），
+所以不能把 `glass.GlassButton` 换成别的部件；改为把它的玻璃层整体关掉：
+
+```text
+draw_glass +: { layer_opacity: 0.0 surface_alpha: 0.0 shadow_alpha: 0.0 border_width: 0.0 }
+```
+
+`layer_opacity` 乘在 sdf 最终输出上（`widgets/core/src/gauss_view.rs:808`），
+底、边、阴影、ripple 一起消失，只剩 `draw_text`。文字改成
+`"↻ 重新生成"`（自带字体有 U+21BB，截图确认不是豆腐块），字号 12、颜色 `#F38181`。
+显隐条件（最后一条 char 且非流式）与点击动作一行未改。
+
+已知差异：网页版 hover 变 `#e86a6a`，这里拿不到 GlassButton 的 hover 颜色通道，
+用 `hover_ink: 0.92` 做轻微变暗代替（深色下可感知，浅色下会略变淡）。
+
+### 20.3 发送键
+
+结构本来就是对的：40×40、圆角 16、可用态 `#F38181` + 白箭头；禁用态
+`#262626`（50% alpha）+ 灰字（50% alpha），等价于整体 opacity 0.5。
+截图采样：禁用圆块 `#202020`，胶囊底 `#1B1B1B` —— 只是略深一档，没有「实心黑块」
+的问题，因此未改。胶囊结构与 `TextInput` 命中区未动。
+
+### 20.4 验证
+
+- `cargo check`、`cargo clippy --release --all-targets -- -D warnings`、`cargo fmt --check` 全绿。
+- `cargo makepad desktop build -p decem-makepad --release` 出包（保住 exe 图标）。
+- `DECEM_THEME=dark` / `light` 各启动 7 秒后结束，stderr 无 `[E]`。
+- 交互回归（深色）：点输入框 → 打字 → Enter 发送 → SSE 回复正常；
+  点「↻ 重新生成」→ 最后一条回复被替换，证明 18px 高的文字链接仍能命中。
