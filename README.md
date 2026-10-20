@@ -365,17 +365,41 @@ curl -v --max-time 10 http://api.valedecem.top:3000/health
 
 ## 🛰️ AI 接口实现
 
-`netlify/edge-functions/chat.ts` 转发 POST 请求到：
+服务端（`netlify/edge-functions/chat.ts`，或自建的 `server/index.ts`）把
+`POST /api/chat` 转发到百炼 OpenAI 兼容接口，默认地址是业务空间专属域名
+（华北2 北京）：
 
-- `https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions`
+- `https://ws-zmqlsmdnc8tvge0q.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions`
 
-请求采用 `stream: false`，并返回完整结果给前端。
+上游地址可用环境变量 `DASHSCOPE_API_URL` 覆盖（留空即用默认值）；换业务空间或
+地域时只改这一个变量，请求体与鉴权方式都不变。
 
 前端请求实现于 `src/services/aiApi.ts`：
 
 - 请求地址：`/api/chat`
 - 发送模型 ID 和消息历史
 - 解析并返回 `content`
+
+### 百炼业务空间专属域名
+
+共享域名 `dashscope.aliyuncs.com` 自 2026-09-30 起进入维护状态：现有服务不受影响，
+但不再迭代新特性。本项目默认已切到业务空间专属域名；换空间/地域时用
+`DASHSCOPE_API_URL` 覆盖：
+
+```bash
+# 华北2（北京）—— 当前默认值
+DASHSCOPE_API_URL=https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions
+
+# 新加坡
+DASHSCOPE_API_URL=https://{WorkspaceId}.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions
+```
+
+- `{WorkspaceId}` 在百炼控制台的**业务空间详情**页查看（不是 API Key）；
+- **API Key 与地域绑定**：换到其他地域的域名必须同时换用该地域创建的 Key，
+  否则返回 401 `invalid_api_key`（不是 Key 失效）；
+- Netlify 部署：在站点环境变量里加 `DASHSCOPE_API_URL`；
+  Railway / 自建服务器：写进 `server` 服务的 `.env` 后重启；
+- 桌面版直连百炼时同样读取这个变量（`crates/decem-core`）；走本项目代理时不需要。
 
 ## 🎛️ 运行说明
 
@@ -418,7 +442,8 @@ pnpm install
 API_KEY=sk-xxxxxxxxxxxxxxxxxxxx
 ```
 
-> Edge Function 会读取以下环境变量之一：`API_KEY`、`DASHSCOPE_API_KEY`、`NETLIFY_API_KEY`
+> Edge Function 会读取以下环境变量之一：`API_KEY`、`DASHSCOPE_API_KEY`、`NETLIFY_API_KEY`；
+> 可选的上游地址用 `DASHSCOPE_API_URL` 覆盖（见「百炼业务空间专属域名」）。
 
 ### 3. 登录 Netlify，并将当前项目与 Netlify 站点绑定
 

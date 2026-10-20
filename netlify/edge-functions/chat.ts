@@ -1,4 +1,7 @@
-const API_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions';
+// 默认走百炼业务空间专属域名（华北2 北京）；换空间/地域用 DASHSCOPE_API_URL 覆盖：
+// https://{WorkspaceId}.{region}.maas.aliyuncs.com/compatible-mode/v1/chat/completions
+const DEFAULT_API_URL =
+  'https://ws-zmqlsmdnc8tvge0q.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions';
 
 // 统一返回 JSON 响应，避免重复的 Content-Type 头与序列化代码
 const jsonResponse = (body: unknown, status = 200) =>
@@ -28,6 +31,8 @@ export default async (request: Request) => {
     return jsonResponse({ error: 'Server API key is not configured' }, 500);
   }
 
+  const apiUrl = getEnv('DASHSCOPE_API_URL')?.trim() || DEFAULT_API_URL;
+
   let payload: unknown;
   try {
     payload = await request.json();
@@ -41,7 +46,7 @@ export default async (request: Request) => {
     return jsonResponse({ error: 'Missing model or messages' }, 400);
   }
 
-  const externalResponse = await fetch(API_URL, {
+  const externalResponse = await fetch(apiUrl, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

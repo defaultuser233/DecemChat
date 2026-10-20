@@ -35,5 +35,7 @@ pub use models::{
 };
 pub use prompt::SYSTEM_PROMPT;
 #[cfg(feature = "http")]
-pub use provider::{API_URL, ChatStream, Client, api_key_from_env};
+pub use provider::{
+    API_URL, API_URL_ENV_VAR, ChatStream, Client, api_key_from_env, api_url_from_env,
+};
 pub use sse::{SseDecoder, SseOutcome, parse_sse_line};

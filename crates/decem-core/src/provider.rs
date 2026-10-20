@@ -14,8 +14,22 @@ use crate::error::{Error, Result};
 use crate::message::ChatRequest;
 use crate::sse::{SseDecoder, SseOutcome, parse_sse_line};
 
-/// DashScope 兼容模式接口地址。
-pub const API_URL: &str = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions";
+/// 默认上游地址：百炼业务空间专属域名（华北2 北京）。
+///
+/// 自 2026-09-30 起共享域名 `dashscope.aliyuncs.com` 进入维护状态，默认改用
+/// 专属域名；换业务空间或地域时用 [`API_URL_ENV_VAR`] 覆盖，调用方式不变。
+pub const API_URL: &str =
+    "https://ws-zmqlsmdnc8tvge0q.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions";
+
+/// 覆盖上游接口地址的环境变量。
+///
+/// 百炼业务空间专属域名的完整格式（注意 Key 与地域绑定）：
+///
+/// ```text
+/// https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions
+/// https://{WorkspaceId}.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions
+/// ```
+pub const API_URL_ENV_VAR: &str = "DASHSCOPE_API_URL";
 
 /// 依次尝试的环境变量名，先命中者生效。
 pub const API_KEY_ENV_VARS: &[&str] = &["API_KEY", "DASHSCOPE_API_KEY", "NETLIFY_API_KEY"];
@@ -37,6 +51,9 @@ pub struct Client {
 
 impl Client {
     /// 用显式提供的 API Key 创建客户端；空字符串表示不带鉴权头。
+    ///
+    /// 接口地址取 [`api_url_from_env`]（`DASHSCOPE_API_URL` 优先，否则共享域名），
+    /// 之后仍可用 [`Client::with_api_url`] 覆盖。
     pub fn new(api_key: impl Into<String>) -> Result<Self> {
         let http = reqwest::Client::builder()
             .user_agent(concat!("decemchat/", env!("CARGO_PKG_VERSION")))
@@ -45,7 +62,7 @@ impl Client {
         Ok(Self {
             http,
             api_key: api_key.into(),
-            api_url: API_URL.to_owned(),
+            api_url: api_url_from_env(),
         })
     }
 
@@ -127,6 +144,21 @@ pub fn api_key_from_env() -> Option<String> {
             .ok()
             .filter(|value| !value.trim().is_empty())
     })
+}
+
+/// 上游接口地址：`DASHSCOPE_API_URL` 非空时用它，否则用共享域名 [`API_URL`]。
+///
+/// 迁移到百炼业务空间专属域名时只需设置这个环境变量，调用方式不变。
+pub fn api_url_from_env() -> String {
+    resolve_api_url(std::env::var(API_URL_ENV_VAR).ok().as_deref())
+}
+
+fn resolve_api_url(override_url: Option<&str>) -> String {
+    override_url
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| API_URL.to_owned())
 }
 
 /// 一次流式对话。
@@ -280,6 +312,15 @@ mod tests {
             None
         );
         assert_eq!(extract_buffered_content("not json"), None);
+    }
+
+    #[test]
+    fn api_url_prefers_non_empty_override() {
+        let workspace =
+            "https://ws-123.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions";
+        assert_eq!(resolve_api_url(Some(workspace)), workspace);
+        assert_eq!(resolve_api_url(Some("  ")), API_URL);
+        assert_eq!(resolve_api_url(None), API_URL);
     }
 
     #[test]

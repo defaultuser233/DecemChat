@@ -9,7 +9,12 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Readable } from 'node:stream';
 
-const API_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions';
+// 默认走百炼业务空间专属域名（华北2 北京）。换空间/地域用 DASHSCOPE_API_URL 覆盖：
+// https://{WorkspaceId}.{region}.maas.aliyuncs.com/compatible-mode/v1/chat/completions
+// （region 如 cn-beijing / ap-southeast-1；API Key 必须与地域一致）
+const API_URL =
+  process.env.DASHSCOPE_API_URL?.trim() ||
+  'https://ws-zmqlsmdnc8tvge0q.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions';
 
 // Railway 会注入 PORT（动态端口）；本地默认 3000
 const PORT = Number(process.env.PORT || 3000);
