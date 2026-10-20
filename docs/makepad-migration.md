@@ -1321,3 +1321,538 @@ cargo makepad desktop build -p decem-makepad --release → Finished release in 4
 - 抽屉（深色/浅色各一张）：user 是描边人形、浅色模式显示太阳、
   深色模式显示月亮、清空分区是描边垃圾桶；在线点明显比旧的 12px 大，
   位于头像右下并溢出 2px。
+
+## 27. 输入框多行、按钮圆角、外链与聊天记录持久化（2026-10-19）
+
+### 27.1 Shift+Enter 换行：`is_multiline` + `submit_on_enter`
+
+之前输入框只设了 `width/height/padding`，`TextInput` 默认 `is_multiline: false`，
+所有 Enter（含 Shift+Enter）都会直接发 `Returned`，Shift 被吞掉。
+
+```text
+input := glass.TextInput {
+    height: Fit{min: FitBound.Abs(40), max: FitBound.Abs(120)}
+    is_multiline: true
+    submit_on_enter: true
+    keep_focus_on_submit: true
+    ...
+}
+```
+
+- `submit_on_enter: true`：物理键盘上**裸 Enter 发送、Shift+Enter 插换行**
+  （`widgets/core/src/text_input.rs:3229-3300`）。`is_multiline: false` 时
+  Shift+Enter 分支会走 `submit()`，所以两者必须一起开。
+- `keep_focus_on_submit: true`：发完不清键盘焦点（网页版 textarea 也保持焦点）。
+- 高度 `Fit{min:40, max:120}` 对应网页版 `min-h-[40px] max-h-[120px]`：
+  单行与 40px 按钮同高，多行自动长高，到顶后输入框内部滚动。
+- 行容器与胶囊都改成 `height: Fit` + `align{y: 1.0}`（网页版 `items-end`）。
+  **不要**在 Fit 高度下用 `flow: Overlay` 叠一圈 `height: Fill` 的描边层——
+  Fill 子部件拿不到父高。聚焦环改为直接切 `pill_bg` 的
+  `draw_bg.border_size`（`script_apply_eval!`，0 / 2px），仍然是内描边、不占布局。
+
+### 27.2 Button 的 SDF 圆角是「视觉半径的一半」
+
+`Sdf2d.box/box_all` 内部是 `k = 2 * r`（`draw/src/shader/sdf.rs:410-430`），
+所以 `ButtonFlat` / `glass.Button`（以及所有走 `sdf.box` 的按钮）写
+`border_radius: 12` 实际画出来是 **24px 圆角**，40×40 的按钮就变成正圆。
+
+| 想要 | 网页 class / 值 | 按钮里写 |
+|---|---|---|
+| 16px | `rounded-xl`（本项目 `--radius:12px` + 4） | `8.0` |
+| 12px | `rounded-lg` | `6.0` |
+| 10px | `rounded-md`（`--radius - 2`） | `5.0` |
+
+`RoundedView` / `View` 的 `draw_bg` 是另一套 shader，`border_radius` 就是字面值，
+**不要**一起减半。胶囊 16、抽屉 0、开关轨道 12 都是字面值。
+
+### 27.3 Windows 的 `Cx::open_url` 是空实现
+
+`platform/src/os/windows/windows.rs:1474` 只 `error!("open_url not implemented")`，
+所以 GitHub 图标点了没反应。桌面端自己调 `ShellExecuteW`
+（`shell32`，`open` + `SW_SHOWNORMAL`）；macOS / Android 后端有实现，
+继续走 `Cx::open_url`。见 `main.rs::open_external_url`。
+
+### 27.4 聊天记录持久化
+
+`%APPDATA%\DecemChat\chat-history.json`（与头像、主题同目录）：
+
+- 只存 `role/text/time`，最多最近 50 条——与网页版 `useChat` 的 localStorage
+  策略一致；**图片 base64 不落盘**，重启后图片不恢复（网页版也只把图放 IndexedDB）。
+- `save_history` 在四个点落盘：用户消息入列、流式收尾（含 Esc / 失败）、清空、
+  重新生成截断。不在每个流式 delta 上写盘。
+- 启动时 `load_history` 恢复；文件不存在是正常情况，格式坏了会追一条 `⚠️`
+  消息（不静默吞掉）。
+
+### 27.5 抽屉细节对齐
+
+- 右上角 ✕ 从文本「×」换成 lucide `x`（`resources/icons/x.svg`，
+  与其余图标同一套 `include_bytes!` + `mod.decem_icons.x`）：
+  36×36 按钮、20px 图标、视觉圆角 12（按钮写 6）。
+- 头部 `p-4` → 高度 68（36 按钮 + 上下 16），不再是固定 56。
+- 段内间距 8 → **12**（网页版 `space-y-3`）。
+- 开关 32×18.4/16 → **44×24/20**（`switch_knob_left()` 同步改成 44-20-2）。
+- 清空区标题颜色改 `#EF4444`（网页版 `text-destructive`）。
+
+### 27.6 验证
+
+```text
+cargo check / cargo clippy --release --all-targets -- -D warnings → 0 warning
+cargo makepad desktop build -p decem-makepad --release            → Finished
+深色 / 浅色启动                                                   → [E]=0, font miss=0
+```
+
+kimi-cu 实测（1470×1140）：
+
+- 输入「你好」→ Shift+Enter →「第二行」：输入框长到两行，发送后上游回复
+  正确引用「第二行」，确认换行保留。
+- 重启 exe：`chat-history.json` 里的三条消息完整回到列表。
+- 点 GitHub 图标：Edge 新标签打开 `defaultuser233/DecemChat`。
+- 点图片按钮：弹出「选一张图」文件对话框；`DECEM_IMAGE` 注入时占位文字
+  切换为「添加描述（可选）...」，发送键点亮。
+- 已知限制（**已于 §29 修正**）：这一版抽屉的 glass 底还是纯色 0.8；后来发现
+  Makepad 自带 `GaussRoundedView` 能采样并模糊窗口背景，见 §29。
+
+## 28. 按 CSS/JS 源码做像素级对齐（2026-10-19 第二轮）
+
+这一轮不再按截图猜，直接对着 `src/index.css`、`tailwind.config.js`、`src/components/*.tsx`
+和 `ui/button|switch|select|alert-dialog.tsx` 逐项改。下面是容易再踩的结论。
+
+### 28.1 `RoundedView` / `Image` 的圆角也是「视觉半径的一半」
+
+上一节只写了 Button 的 SDF；实测 `mod.widgets.RoundedView`（`view_ui.rs:351-390`）
+和 `Image`（`image.rs:217-221`）同样走 `Sdf2d.box`，内部是 `k = 2 * r`
+（`draw/src/shader/sdf.rs:410-430`）。**所有 RoundedView/Image 的
+`border_radius` 都要写 CSS 值的一半**，否则会圆一倍：
+
+| CSS | 写入 |
+|---|---|
+| 胶囊 `rounded-2xl` 16 | 8 |
+| 气泡 18 / 4 | 9 / 2 |
+| 代码块 `rounded-lg` 12 | 6 |
+| 主题行 `rounded-lg` 12 | 6 |
+| 触发器/列表/清空 `rounded-md` 10 | 5 |
+| 模型行 `rounded-sm` 8 | 4 |
+| 图片预览 `rounded-lg` 12 | 6 |
+| 消息图片 `rounded-lg` 12 | 6 |
+| 圆/胶囊（头像、开关、徽章） | 半边长/2 即可饱和 |
+
+判断依据：改之前 56px 高的输入胶囊写 16，渲染出来是 32 → 两端全圆，和网页版
+16px 圆角矩形明显不同。
+
+### 28.2 气泡小角方向：以 CSS 简写为准
+
+`border-radius: a b c d` 的顺序是 **TL TR BR BL**：
+
+- 用户 `.message-bubble-user: 18px 18px 4px 18px` → 小角在**右下**（朝向右侧用户头像）
+- char `.message-bubble-bot: 18px 18px 18px 4px` → 小角在**左下**（朝向左侧 char 头像）
+
+`docs/makepad-visual-spec.md` 之前写反了，已修正。每个角用
+`RoundedAllView`（不是 `RoundedView`）的 `border_radius: uniform(vec4(...))`，
+顺序是 **lt, rt, rb, lb**。
+
+### 28.3 中文字体：系统雅黑，不是 LXGW
+
+网页字体栈在 Windows 上把中文落到 **Microsoft YaHei**；Makepad 自带的
+CJK 兜底是 LXGW WenKai（楷体），观感差别很大。现在用
+`mod.res.file_resource("C:/Windows/Fonts/msyh.ttc")`（粗体 `msyhbd.ttc`）
+接进 `font_regular/font_bold/font_code/font_display` 的 CJK 槽位，
+非 Windows 才退回 LXGW。`file_resource` 是运行期按绝对路径读，不把
+36MB 字体塞进 exe；`ttf_parser` 能解析 TTC 的 face 0。
+
+### 28.4 消息区尺寸（源码值）
+
+- 滚动容器 `px-4 py-4`；相邻消息 `space-y-6`。实现：每条消息上下 padding 12，
+  容器上下 padding 4（首尾合计 16，之间 24）。
+- 消息列 `max-w-3xl` = 768；内容列 `max-w-[75%]` = 576 → `Bubble.cap_width = 576`。
+- 气泡 `px-4 py-3` = 左右 16、上下 12 → `pad_x = 32`。
+- 正文 `text-sm leading-relaxed` = 14px / 1.625em。Makepad 的 `line_spacing`
+  是自然行高的倍数（Lato 约 1.2em），写 **1.35** ≈ 22.7px。
+- Markdown：`paragraph_spacing: 4`（网页 `p mb-1`）、
+  `heading_base_scale: 1.6`、行内代码 12px/内距 6×2/2、`code_color #00000033`
+  （网页 `bg-black/20`）、代码块底 `#0000004D`（`bg-black/30`）。
+- Markdown 自带的 `padding: theme.mspace_1`（3px）会让正文比气泡多缩进，
+  消息里的 Markdown 显式写 `padding: 0`。
+- 时间戳：`mt-1` 4、`gap-2` 8、12px muted；重新生成 12px 珊瑚 +
+  lucide `rotate-ccw` 12（不再是 `↻` 文本）。
+
+### 28.5 抽屉/下拉（源码值）
+
+- 头部 `p-4`：36 关闭键 + 上下 16 = 68 高；关闭键 20px lucide `x`、圆角 12。
+- `space-y-6` 24；每段 `space-y-3` 12。
+- 开关按 `ui/switch.tsx`：`h-[1.15rem] w-8` = 18.4×32、滑块 `size-4` 16，
+  选中位移 `calc(100%-2px)` = 14。**不要**按 Tailwind 文档默认的 44×24。
+- 上传/清空按钮 `size=sm`：h-8 32、rounded-md 10、text-sm 14、图标 16、gap 6；
+  描边用 `border-input`（#262626 / #E6E6E6），底 `bg-input/30`。
+- 模型下拉是 **Portal 浮层**：新建 `model_dropdown := Modal`，透明遮罩、
+  右对齐、距顶 167，宽 320（内距 16）；不再参与抽屉布局，也不再把下面的
+  分区往下推。行高 `Fit`（约 50）、`py-1.5 pr-8 pl-2`、选中/悬停
+  accent `#8FD4E5` + 黑字，右侧 lucide `check` 16。
+- 清空确认框按 `alert-dialog.tsx` + `glass-effect`：max-w-lg 512、
+  rounded-lg 12、p-6、gap-4、玻璃底；标题 18、描述 14。
+
+### 28.6 图片消息与持久化
+
+- 预览：网页 `h-20` 自动宽。解码后 `photo.size_in_pixels(cx)` 取真实尺寸，
+  `set_walk_and_fit` 设成 `80 × (80*w/h)`（上限 240），圆角 6、1px 边框、下边距 12。
+- 消息图：`max-h-48` 192、不放大（scale ≤ 1），圆角 6、下边距 8；
+  气泡宽度 = `max(文字宽度, 图片宽度) + 32`（`BUBBLE_BODY` 的第三项传图片宽）。
+- 持久化升级：图片字节写到 `%APPDATA%\DecemChat\images\<content-hash>.<ext>`，
+  JSON 只存文件名（对应网页版的 IndexedDB）；重启后按文件名读回并重建 data URL。
+  旧 JSON 里没有 `image` 且文字为空的消息直接丢掉（否则会出现空通栏气泡）。
+
+### 28.7 其他
+
+- 滚动条照 `.custom-scrollbar`：6px、透明轨道、珊瑚 30%（hover 50%）、
+  `auto_hide`。用户侧消息右侧留 8，让滚动条不压头像。
+- 背景加了一层 ±1.2% 的逐像素灰噪声，近似 `.noise-overlay` 的 3% fractal noise
+  （`Math.random_2d`；`clamp` 在脚本里必须三个参数同型，用 `vec3` 版本）。
+- 仍做不到：`backdrop-filter: blur()`（抽屉/顶栏/输入区）、`font-medium` 500
+  （Lato 没有 500，浏览器也是合成）、`letter-spacing`（TextStyle 无此字段）、
+  头像 scale 呼吸/hover 旋转与消息 slide-up（View 没有组透明度和变换）。
+
+## 29. 更正 §28.7 的「做不到」清单（源码核实）
+
+§28.7 有两条结论是凭印象写的，源码里其实有现成机制。以下都给出文件与行号。
+
+### 29.1 背景模糊：`GaussRoundedView` 能做，已接进抽屉
+
+`widgets/core/src/gauss_view.rs:1-40` 的模块注释写得很清楚：它会采样窗口
+自己的画面，渲染到纹理并生成 mip 金字塔，再通过圆角 SDF 折射/模糊。
+`blur_level` 是 **mip 层级**（0=原图，6=最糊），不是像素。`tint_color` +
+`tint_alpha` 就是玻璃的底色（`tint_alpha 0.8` = 网页版 rgba(...,0.8)）。
+
+抽屉面板已从 `RoundedView` 换成：
+
+```text
+drawer_panel := GaussRoundedView {
+    draw_bg +: {
+        blur_level: 3.0
+        edge_blur_level: 3.0
+        tint_color: palette().glass
+        tint_alpha: 0.8
+        surface_alpha: 1.0
+        lensing_effect: 0.0
+        rim_alpha: 0.0
+        inner_shadow_alpha: 0.0
+        specular_strength: 0.0
+        corner_radius: 0.0
+    }
+}
+```
+
+它放在 Modal 的 overlay 里，按模块注释会「bind the window's capture and draw
+inline」，不会另开一层。实测抽屉背后是模糊过的消息/图片，不再是清晰轮廓。
+
+还没做的：遮罩的 `backdrop-filter: blur(4px)`。`Modal` 的 `bg_view` 是一个
+固定 View，要整屏模糊得把 Modal 内容改成 Overlay 并把 bg_view 透明，
+再自己放一层全屏 Gauss；点击关闭的命中逻辑要一起改，风险高于收益。
+
+### 29.2 旋转：`DrawSvg.svg_rotation` / `Image.rotation` 都有
+
+- `draw/src/shader/draw_svg.rs:33-35`：`svg_rotation` 是 DrawSvg 的 uniform，
+  单位弧度（绕 rect 中心）。设置齿轮的 hover 直接给 Button 的 animator
+  增加了 `draw_icon.svg_rotation: 0 → π/2`、0.3s 的过渡（Button 原生
+  hover/down 状态机，`widgets/core/src/button.rs:370-402`），底色混合保持不变。
+- `widgets/core/src/image.rs:28-33, 258-268`：`Image` 有 `rotation`（角度）和
+  `image_scale`（vec2）两个 live 字段，`ImageRef::set_uniform` 可以在运行时
+  直接推。所以头像 hover 的 `rotate(5°)` 和呼吸的 `scale(1→1.02)` 不是
+  「做不到」，只是需要一个 hover 命中与 10Hz/60Hz 的相位更新；这轮先没接。
+
+### 29.3 消息 slide-up + 淡入：可以，但要自绘快照
+
+`View` 没有组透明度，但有 `texture_caching` 和
+`View::take_texture_snapshot(cx)`（`widgets/core/src/view.rs` 的
+`ViewTextureCache` / `ViewTextureSnapshot`）。`apps/calendar/src/navigation.rs:90-218`
+就是拿它实现翻页：把旧的子树冻结成纹理，再用一个带 `opacity` uniform 的
+`DrawQuad` 在偏移后的 rect 上画出来，同时画新页。
+
+所以 `animate-slide-up` 的正确做法是：给消息项加一个薄包装部件，新项出现时
+把子树画进缓存纹理，之后 0.5s 内用 `opacity 0→1` + `y +20→0` 画那张纹理，
+结束后切回实时子树。工程量在「包装部件 + 动画状态」而不是引擎能力。
+
+### 29.4 字号 500 / 字距：这两条确实是死路
+
+- `TextStyle` 只有 `font_family / font_size / line_spacing / top_drop`
+  （`draw/src/shader/draw_text.rs:3534-3543`），没有字距。
+- 更底层 `ShapeParams` 有 `letter_spacing`（`draw/src/text/shaper.rs:249-255, 499`），
+  但 `FontFamily::get_or_shape` 把它**写死成 0**（`draw/src/text/font_family.rs:70-82`），
+  没有任何 live 字段能传进去。要支持得改 Makepad 依赖。
+- `FontMember.weight` 会映射到 OpenType `wght` 轴；Lato 是静态字体、没有这个轴，
+  所以 500 没有独立字形。浏览器对静态字体也是合成加粗，不是真 500。要严格
+  一致得换可变字体（会改字形，不只是字重）。
+
+## 30. 用户反馈七项修复（2026-10-20）
+
+### 30.1 绿点放大到 16
+
+网页 CSS 是 `w-3`（12px），但用户两次反馈偏小；按用户要求改为 **16×16**
+（定位层仍 42×42，右下各溢出 2），2px 背景色描边不变。
+
+### 30.2 输入区按钮垂直居中
+
+之前照网页 `items-end` 写 `align{y:1.0}`，单行时输入框自然高度略大于 40
+会让按钮偏下。按用户要求把外层行和胶囊内行都改成 `align{y:0.5}`。
+
+### 30.3 按钮 hover：DrawSvg 的颜色不能直接改
+
+实测 `button.draw_icon.color = coral` 之后日志确认字段已变、渲染仍是白色。
+原因：DrawSvg 的 `color` 是 shader 里的实例色，Rust 字段只是镜像；而
+`script_apply_eval!` 到 Button 上会重新 apply 整个对象、丢掉已加载的 SVG
+（`widgets/core/src/button.rs:1152-1155` 的注释也这么说）。
+
+可靠做法：**叠两个静态 Svg**（正文色 / 珊瑚色），用 `set_visible` 切显隐；
+透明 ButtonFlat 压在最上层负责命中与 hover 底色。Rust 侧在 `Event::MouseMove`
+里用 `event.hits(cx, button.area())` 判 hover，切换两个 View。
+图片按钮的 hover 底色也从 10% 提到 15%（`#F3818126`），状态更明显。
+
+### 30.4 GIF 抽帧（阿里云读不了动图）
+
+新增依赖：`image`（gif/jpeg/png），`fontdue`（画帧号）。
+
+流程照 `src/services/gifFrames.ts`：
+
+1. `image::codecs::gif::GifDecoder` 解出**已按 disposal 合成**的全画幅帧
+   （image 的 GifFrameIterator 内部会 `blend_and_dispose_pixel`）。
+2. 按累计时长等间隔取至多 **6 帧**（`pick_gif_indices`，与 JS 同算法）。
+3. 每帧铺白底、最长边缩到 **512**；网格 1-3 帧单行、4 帧 2×2、5-6 帧 3×N，
+   间距 6、底部标签带 20；用 fontdue + 内嵌 Lato 12px 画帧号 1..6（灰色 #666）。
+4. **输出 JPEG 82 而不是 PNG**：4 帧 512 的 PNG 达 1.7MB，上游直接 413；
+   JPEG 通常 300–500KB。预览、消息气泡和持久化都用这张网格。
+5. `hint` 通过 `decem_core::Message.hint` 只发给上游（不进气泡）：
+   `[此图为GIF动图抽取的N帧拼接，按时间先后顺序排列]`，并随聊天记录持久化。
+
+### 30.5 请求体预算：900KB，从最旧的消息丢图
+
+上游 nginx 的 `client_max_body_size` 默认是 1MB（服务端 express 的 20mb
+在它后面）。实测带 3MB 图片历史会 413。`build_request_body` 现在循环：
+超过 900KB 就把 `keep_from` 往前挪，**从最旧的消息开始不带图**；连最新
+一张图都丢掉还超限才报错（提示换小图），不会静默发一条没有图的请求。
+
+非 GIF 图片在选图时也会压缩（网页版 `images.ts` 同款）：
+>300KB 才处理、最长边 1568、PNG 保持 PNG、其余 JPEG 82。
+
+聊天记录改为**临时文件 + rename** 原子写入，避免进程在写盘中途被杀导致
+JSON 半截（实测并发读时见过一次半截文件）。
+
+### 30.6 模型下拉的关闭
+
+之前下拉的 `Modal` content 是 320 宽全高，点抽屉里列表以外的区域仍算
+content、不会 dismiss，用户找不到关闭方式。现在 content 铺满窗口：
+底层一个全透明 `ButtonFlat`（`dismiss_models_button`）接收列表外的点击，
+列表在它上面；点任何地方都能关。Esc/选模型仍由 Modal 自己处理。
+
+### 30.7 滚动条移到窗口右缘
+
+原来是 `ChatList { max_width: 768 }` 内嵌滚动，滚动条落在 768 列右边缘、
+贴着用户头像。现在：
+
+- `ChatList` 铺满窗口（PortalList 的滚动条在窗口右缘）；
+- 每个 item 内部套「全宽 wrapper（align x:0.5）→ max_width 768 的内容列」；
+- item 的左右 padding 移到 wrapper（16），上下仍在内容列（12）+ 列表 4。
+
+### 30.8 思考动画
+
+首帧（`streaming.is_empty()`）显示用户给的 **`loading-27`** 同款：
+三个同心椭圆环——外环 2s 一圈、内环 3s 正转、另一个 3s 反转，
+右侧是「狐狐正在思考...」14px。
+
+- 椭圆环用 shader 的隐式曲线 `(x/a)²+(y/b)²-1=0` 画，环厚按梯度归一化
+  距离计算，任意旋转角度下都是平滑矢量边，没有位图锯齿；
+- CSS 的 60×25 按比例缩到 **40×40** 容器（椭圆半轴 19×8，环厚 1.5），
+  旋转椭圆的完整包络正好放进这个盒子；
+- `draw_pass.time` 驱动三个角度（`t·π`、`t·2π/3`、`-t·2π/3`），
+  可见时窗口自动逐帧重绘；隐藏后不再占帧；
+- 之前的双心/emoji 动画已移除（`theme.font_emoji` 也删掉了）。
+
+### 30.9 验证
+
+```text
+cargo clippy --release --all-targets -- -D warnings → 0 warning
+cargo makepad desktop build -p decem-makepad --release → Finished
+深色 / 浅色启动 → [E]=0，font miss=0
+```
+
+- GIF（gifuct-js 的 dog.gif）：预览/气泡为 2×2 网格；模型正确描述狗的四个动作。
+- 首次 PNG 网格 413，改 JPEG + 900KB 预算后同一条历史发送成功。
+- hover 图片按钮：图标变珊瑚、底色变亮（两张截图对比）。
+- 模型下拉：点抽屉任意非列表位置即关闭。
+- 思考态：截图可见三个珊瑚椭圆环（2s/3s/反向 3s）+「狐狐正在思考...」。
+- 图片压缩：>300KB 的 JPEG 会重编码到最长边 1568；GIF 网格不受影响。
+
+## 31. 第二轮反馈四项（2026-10-20）
+
+### 31.1 纸飞机不居中：空 label 仍占 spacing
+
+Button 的图标和文字之间会保留 `spacing`（默认 `theme.space_2` = 6）。
+纯图标按钮的 label 宽度是 0，但 6px 间距还在，图标被整体左移 3px。
+发送键、GitHub、设置、抽屉关闭键都加 `spacing: 0`，纸飞机回到正中。
+
+### 31.2 「Ave atque vale」的彩色/动效
+
+之前 `#(footer_glow())` 是**脚本求值一次**就定格的，10Hz 重绘不会重新求值，
+所以看起来是静态单色。现在：
+
+- 把文本拆成三个 Label（`Ave` / `atque` / `vale`），各自取渐变相位
+  0 / 0.33 / 0.66（`footer_color(offset)`）；
+- 光晕定时器每 100ms 用 `set_text_color` 把三色推进一格；
+- 视觉上是三色词同时存在、并沿珊瑚→薄荷→黄缓慢流动。
+
+真正的 `background-clip: text` 逐字渐变仍然做不到（TextStyle 无渐变；
+自定义 DrawText shader 需要改 Makepad 依赖）。
+
+### 31.3 模型列表黑底黑字：Fill 高亮在 Fit 父级里塌成 0
+
+上一轮为了贴合网页行高把 `ModelRow` 改成 `height: Fit`，但 `row_hl`
+是 `height: Fill` 的叠层——Overlay + Fit 父级拿不到高度，高亮层消失；
+选中/悬停行把文字设成黑色，就变成黑底黑字。
+行高改回固定 **52**（两行 14/12 + 上下 6 + 2 间距 ≈ 50，接近网页行高），
+`row_hl` 恢复 Fill 高度，选中行重新是薄荷底 + 黑字，其余行白字。
+
+### 31.4 顶栏头像用错了
+
+`header_avatar_bytes` 之前优先返回用户上传的头像；网页版顶栏始终画
+`settings.charAvatar`（Decem），「更改头像」只影响用户消息一侧。
+现在固定返回 `avatar_bytes(Role::Char)`，并删掉 `UserAvatar.custom`
+（它只为顶栏存在）。用户头像仍用于消息列表和设置预览。
+
+## 32. 气泡右侧空一块（2026-10-20）
+
+用户截图里「咪的天」右侧明显多出一截。根因是 `Bubble` 量宽时**无条件**
+加了 16px 余量：
+
+```text
+width = 文本宽度 + 左右 padding(32) + 16
+```
+
+这 16px 是当初为了掩盖「量宽实例与 Markdown 渲染实例的 emoji/字距差异」
+加的，防止欢迎语提前折行；但短消息没有折行问题，结果就是右边比左边多
+16px 空白。
+
+现在只在两种情况下保留 16px：
+
+- 文本含 emoji（`has_emoji`：U+1F000–1FAFF、U+FE0F、U+2600–27BF）；
+- 文本宽度已接近换行上限（`used + pad_x + 24 >= cap`），不给余量会提前折行。
+
+其余短消息只留 **2px** 舍入余量。实测「咪的天」气泡左右各 16px，
+长消息的换行点与之前一致。
+
+## 34. 苹果式圆角矩形（squircle，2026-10-20）
+
+用户要求把 UI 的圆角矩形改成苹果那种连续圆角。实现分两层：
+
+### 34.1 `SquircleView`
+
+新增自定义 `SquircleView`（`View` + 自己的 `draw_bg.pixel`），不是普通
+rounded-rect 的「四分之一圆弧 + 直线」，而是**四次超椭圆**：
+
+```text
+q = abs(p - half) - (half - r)
+d = (max(q.x,0)^4 + max(q.y,0)^4)^(1/4) + min(max(q.x,q.y),0) - r
+```
+
+四次超椭圆在圆角与直边的衔接处曲率连续，就是 iOS 图标/Continuous Corners
+的观感；普通圆弧在衔接处曲率突变。`corner_n` 可调（默认 4.0）。
+
+- `border_radius` 是 **vec4 视觉半径**（TL/TR/BR/BL），不再像 `RoundedView`
+  那样写「视觉的一半」；
+- 支持 `color` / `color_2` + `gradient_fill_horizontal`（用户气泡的珊瑚渐变）；
+- 支持 `border_size` / `border_color`：外圈用边框色填满，再内缩 `border_size`
+  填内容色，得到标准的 1px/2px 内描边；
+- `Sdf2d.shape` 直接写超椭圆距离，复用 Makepad 的 `fill_keep` 抗锯齿。
+
+已替换：输入胶囊（16）、char 气泡（4/18/18/18，左上小角指向头像）、
+用户气泡（18/4/18/18，右上小角指向头像）、
+代码块（12）、模型触发器（10）、模型列表（10）、模型行高亮（8）、
+深浅色行（12）、清空确认卡片（12）。
+
+### 34.2 `SquircleButton` / `SquircleFlatButton`
+
+Button 的 `draw_bg` 是自定义 shader，直接换 widget 会丢 hover/down 混色。
+做法是按 `glass.Button` / `ButtonFlat` 派生一个模板，只覆盖 `pixel`，
+继续调用继承来的 `face_fill()` / `face_stroke()`：
+
+- `border_radius` 仍是按钮模板的「视觉半径的一半」，shader 里 `* 2`；
+- 外圈 `face_stroke()`、内圈 `face_fill()`，保留 disabled/hover 的混色；
+- 已替换：发送、图片、GitHub、设置、抽屉关闭、上传头像、清空记录、
+  确认框的取消/确认、模型触发器覆盖层（主题开关的透明命中层也换了，
+  但它是圆形轨道上的不可见层，不影响外观）。
+
+### 34.3 仍保持原形的部件
+
+头像（圆形）、在线点（圆形）、开关（胶囊）、滚动条（细长圆角条）、
+消息图片/预览图（Image 自己的圆角裁剪，不是 UI 面）。这些本来就不是
+「圆角矩形」，不需要 squircle。
+
+### 34.4 验证
+
+```text
+cargo clippy --release --all-targets -- -D warnings → 0 warning
+cargo makepad desktop build -p decem-makepad --release → Finished
+深色 / 浅色启动 → [E]=0，font miss=0
+```
+
+深色/浅色截图确认：输入胶囊、两种气泡、抽屉里的触发器、深浅色行、
+上传/清空按钮、确认卡片都是连续圆角；按钮的 hover/disabled 状态仍正常。
+
+## 35. 输入框聚焦时整块变红（2026-10-20）
+
+Squircle 的边框绘制顺序踩了半透明填充的坑：先 `fill_keep(border_color)` 铺满
+外框、再内缩铺 `color`。输入胶囊的 `row_bg` 是 **50% 透明**，底下的珊瑚边框色
+透上来，整个胶囊变成暗红色（用户说的“有点吓人”）。
+
+正确顺序：
+
+1. 先用内容色填外框（半透明也没关系，下面是输入区的深色底）；
+2. 再用 `shape = max(outer, -inner)` 只填**边框环**，叠上边框色。
+
+`outer` 在外框内为负，`-inner` 在内框内为正，所以 `max` 只在「外框内、内框外」
+为负——正好是 2px 环。`SquircleView` 与两个 `SquircleButton` 着色器都按这个
+顺序改了；输入框聚焦恢复为「深色胶囊 + 2px 珊瑚描边」，上传/触发器按钮的
+半透明底也不再被边框色染色。
+
+最终按用户澄清处理：**只有边框环上色，内部保持内容填充不变**。
+`sync_input_focus` 在聚焦时把 `pill_bg.border_size` 设为 2px，失焦设回 0；
+SquircleView 先填 `draw_bg.color`（深色半透明），再在**内缩 border/2 的轮廓**上
+`sdf.stroke(border_color, border)`——带宽从外轮廓到 border 像素内侧，全部落在
+圆角形状里，四边对称且角是圆的。
+（踩过两次：`max(outer, -inner)` 填环只出右下两条；直接 stroke 外轮廓会把
+外半圈画到四角外面，看起来是尖角。）
+气泡、卡片、上传按钮等需要边框的部件共用同一套 stroke 绘制。
+
+## 36. 齿轮与抽屉关闭键对齐（2026-10-20）
+
+用户反馈：顶栏的设置齿轮和设置抽屉右上角的 ✕ 不在同一个位置。
+
+根因是两层叠加：
+
+1. `Modal::draw_walk` 用 `begin_root_turtle_for_pass` 把内容挂到**窗口 pass 的
+   原点**，而 Makepad 在 Windows 上的自绘标题栏也在同一个 pass 里（`body` 才在
+   标题栏下方）。抽屉于是从窗口最顶端开始，头部整体比顶栏高一个标题栏
+   （150% DPI 下 44px），✕ 中心比齿轮中心正好高这么多；抽屉也会盖住标题栏。
+2. 关闭键此前是 36×36、头部内距 16，和顶栏按钮的 40×40 / 内距 12 不是一套几何，
+   就算起点对齐，中心也差 2px。
+
+修法：
+
+- 顶栏的 `RoundedView` 加 id `app_header`。Rust 侧新增 `sync_drawer_offset`，
+  量 `app_header` 的绝对 `top`（= 标题栏高度；没有标题栏的平台测得 0），
+  写进 `settings_drawer.content` 的 `padding.top`。抽屉从标题栏下方开始，
+  标题行与顶栏同排。
+- 抽屉头部改用顶栏同一套几何：高 64（40 + 上下 12）、左右 16；关闭键
+  40×40、`border_radius: 8.0`（SDF 视觉半径 2×8 = 16，与齿轮一致）。
+  这样两者中心都落在「右缘 −36，顶栏内容中线」。
+- 偏移不能写死：标题栏高度随平台 / DPI / 最大化变化。也不能只应用一次：
+  切主题走 `ScriptReapply` 会把 `#[layout]` 重置成 DSL 里的 0，所以每帧拿
+  当前 `padding.top` 和实测值比，不一致就重写（缓存「已应用」标记会在换主题后
+  又把抽屉缩回标题栏底下）。
+
+验证（150% DPI）：
+
+| 窗口 | 齿轮亮像素中心 | 抽屉 ✕ 亮像素中心 |
+| --- | --- | --- |
+| 1470×1140（深色） | (1415.5, 91.0) | (1415.5, 91.0) |
+| 1470×1140（浅色） | (1415.5, 91.0) | (1415.5, 91.0) |
+| 2560×1600 最大化（深色） | (1534.4, 55.5) | (1534.3, 55.7) |
+
+`cargo clippy --release --all-targets -- -D warnings` 0 warning；
+深浅色、最大化切换后 `[E] = 0`。
